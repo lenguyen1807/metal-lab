@@ -124,8 +124,7 @@ void BenchmarkMgr::start_kernel(const DeviceMatrix& A,
   uint N = C.cols;
   uint K = A.cols;
 
-  MatmulParams params{M, N, K, static_cast<uint32_t>(block_size.width),
-                      static_cast<uint32_t>(block_size.height)};
+  MatmulParams params{M, N, K};
 
   NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
 

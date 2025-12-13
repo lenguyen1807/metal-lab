@@ -8,13 +8,20 @@ This repo is for anyone who wants to learn GPU optimization but don't have NVIDA
 
 ## How fast are we so far?
 
-| Kernel | Best performance (GFLOPS) | Percent of peak performance |
+| Kernel | Best performance (GFLOPS) | % of peak performance (2840 GLOPS) |
 |--------|---------------------------|---|
-| `naive` | $\approx 178$ | $\approx 6.26\%$ |
-| `tile_16` | $\approx 269$ | $\approx 9.12\%$ |
-| `tile_32` | $\approx 195$ | $\approx 6.86\%$ |
-| `tile_threads` | $\approx 359$ | $\approx 12.6\%$ |
-| `tile_simdgroup` | $\approx 421$ | $\approx 17\%$ |
+| `naive` | $\approx 178$ | $\approx 6.26$% |
+| `tile_16` | $\approx 269$ | $\approx 9.12$% |
+| `tile_32` | $\approx 195$ | $\approx 6.86$% |
+| `tile_threads` | $\approx 359$ | $\approx 12.6$% |
+| `tile_simdgroup` | $\approx 421$ | $\approx 14.8$% |
+
+We will conduct benchmarking on vary matrix sizes (`M x N x K`) to represent real-world scenarios then the final GLFOPS is the mean of all benchmarking tests.
+- **Powers of 2 - Square** (for baseline): `M=N=K` and vary from `512` to `4096`.
+- **FFN Layers** (compute-bound): Simulates the feed-forward networks in Transformers (e.g., Llama, GPT). These are typically compute-bound due to the large inner dimension (K) (`K >> M` and `K >> N`).
+- **Attention Layers**: small `K`. For a signel attention head, the GEMM is `(seq_len, head_dim)` and `head_dim` is small compared with `seq_len`.
+- **Skinny Matrices**: with really small `K`. These stress memory bandwidth. The kernel spends more time loading data than computing. GFLOPS will be significantly lower here.
+- **Non-ideal size**: test the kernel's handling of edge cases and non-ideal dimensions.
 
 ## Get it running
 
@@ -64,18 +71,18 @@ The program will spit out performance numbers to your console and also save a de
 - `tile_threads`: Tiling kernel with more work on threads.
 - `tile_simdgroup`: Tiling kernel with `simdgroup` (metal intrinsics).
 
-## The Grand Plan (aka The Optimization Checklist)
+## The Optimization Checklist
 
 This project is structured so you can follow the optimization journey step-by-step. Each new kernel will be a separate file, building on the lessons of the last.
 
 - [x] **Chapter 0: The Setup** Build a solid, memory-safe C++ framework with a real benchmark harness. No segfaults allowed.
-- [x] **Chapter 1: The Tiling** The first real optimization. Use that sweet, sweet shared memory or SMEM (`__threadgroup` in Metal, `__shared__` in CUDA) to stop hitting DRAM so much. This is where we should see the first big performance jump.
+- [x] **Chapter 1: The Tiling** The first real optimization. Use that sweet, sweet shared memory or SMEM (`threadgroup` in Metal, `__shared__` in CUDA) to stop hitting DRAM so much. This is where we should see the first big performance jump.
 - [x] **Chapter 2: More Work, Less Laziness (Register Tiling)** Make each thread compute a small 2x2 or 4x4 block of the output matrix. This increases register reuse and hides instruction latency.
-- [x] **Chapter 3: Embracing the Hardware (SIMD-group Matrix Primitives)** This is the game-changer. We will stop using scalar math and switch to the hardware's native matrix multiplication capabilities.
-- [ ] **Chapter 4: Hiding Latency (Software Pipelining)** Overlap memory fetching with computation using `async_copy` and double-buffering in `threadgroup` memory.
-- [ ] **Chapter 5: Adaptive Tiling (Specialization & Tuning)** Move from runtime parameters to compile-time constants. Implement heuristics to choose the best tile size and configuration for the target GPU and problem size.
+- [x] **Chapter 3: Embracing the Hardware (SIMD-group Matrix Primitives)** This is the game-changer. We stop thinking in scalar operations (a * b) and start thinking in matrices. We'll use Metal's `simdgroup` to command the M2's matrix acceleration hardware (Apple's equivalent of Tensor Cores).
 
-## Performance Analysis
+## Analysis
+
+### Chapter 0: Naive GEMM
 
 ### Chapter 1: The tiling
 
@@ -100,7 +107,7 @@ The answer is **Occupancy**.
       - Threadgroup size: 32x32 = 1024 threads.
       - `threadgroup` memory used: `(32*32 + 32*32) * 4 bytes = 8192 bytes`.
 
-3.  **The Bottleneck:** The M2 GPU's CUs have a limited amount of `threadgroup` memory (32 KB) [^2]. The `tile_32` kernel's 8KB memory footprint is significant. If a single threadgroup consumes too large a chunk of the CU's available memory, the scheduler cannot fit as many *concurrent* threadgroups onto that CU.
+3.  **The Bottleneck:** The M2 GPU's CUs have a limited amount of `threadgroup` memory (32 KB) [^3]. The `tile_32` kernel's 8KB memory footprint is significant. If a single threadgroup consumes too large a chunk of the CU's available memory, the scheduler cannot fit as many *concurrent* threadgroups onto that CU.
 
 With `tile_32`, you might only be able to fit one or two threadgroups per CU, leading to low occupancy. If those few groups stall on a memory read, there are no other resident groups to switch to, and the expensive ALU units sit idle.
 
