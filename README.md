@@ -1,137 +1,154 @@
 # A journey to ~2.84 TFLOPs on my M2 MacBook
 
-This is a diary of my journey to write a fast single-floating point (FP32) matrix multiplication (SGEMM) kernel on my Apple M2 laptop. Since I don't have an NVIDIA card lying around, I'm using Apple's **Metal** API instead of CUDA. The core ideas are the same: making GEMM as fast as possible. 
+This is a diary of my journey to write a fast single-precision floating point (FP32) matrix multiplication (SGEMM) kernel on my Apple M2 laptop.
 
-The theoretical FP32 peak of a 8-core M2 is **~2.84 TFLOPs** (or 2840 GFLOPS) [^1] [^2]. Can we even get close? Let's find out.
+Since I do not have an NVIDIA card lying around, I am using Apple's **Metal** ecosystem instead of CUDA. The core ideas are the same: make GEMM as fast as possible by understanding memory movement, tiling, reuse, occupancy, and the hardware execution model.
 
-This repo is for anyone who wants to learn GPU optimization but don't have NVIDA GPU like me. The code is (a little bit) clean, and built with modern C++ so we don't leak memory all over the place (and shoot our foot in place).
+The new version of this repo uses **Python + MLX custom Metal kernels**. Python handles the boring-but-important parts: correctness checks, benchmark orchestration, CSV output, roofline calculations, and reports. The kernel bodies themselves are still handwritten Metal code, but MLX generates the function signature and launches the kernel for us.
+
+The theoretical FP32 peak of an 8-core M2 GPU is about **2.84 TFLOPs** (2840 GFLOP/s) [^1] [^2]. Can we get close? Let's find out.
+
+This repo is for anyone who wants to learn GPU optimization but does not have an NVIDIA GPU. It is also an excuse to make benchmarking and performance analysis less hand-wavy.
 
 ## How fast are we so far?
 
-| Kernel | Best performance (GFLOPS) | % of peak performance (2840 GLOPS) |
-|--------|---------------------------|---|
-| `naive` | $\approx 178$ | $\approx 6.26$% |
-| `tile_16` | $\approx 269$ | $\approx 9.12$% |
-| `tile_32` | $\approx 195$ | $\approx 6.86$% |
-| `tile_threads` | $\approx 359$ | $\approx 12.6$% |
-| `tile_simdgroup` | $\approx 421$ | $\approx 14.8$% |
+No custom kernel numbers yet. This Python/MLX rewrite is starting from a clean slate.
 
-We will conduct benchmarking on vary matrix sizes (`M x N x K`) to represent real-world scenarios then the final GLFOPS is the mean of all benchmarking tests.
-- **Powers of 2 - Square** (for baseline): `M=N=K` and vary from `512` to `4096`.
-- **FFN Layers** (compute-bound): Simulates the feed-forward networks in Transformers (e.g., Llama, GPT). These are typically compute-bound due to the large inner dimension (K) (`K >> M` and `K >> N`).
-- **Attention Layers**: small `K`. For a signel attention head, the GEMM is `(seq_len, head_dim)` and `head_dim` is small compared with `seq_len`.
-- **Skinny Matrices**: with really small `K`. These stress memory bandwidth. The kernel spends more time loading data than computing. GFLOPS will be significantly lower here.
-- **Non-ideal size**: test the kernel's handling of edge cases and non-ideal dimensions.
+Current baseline:
+
+- `mlx`: calls `mlx.matmul`; used as the correctness and performance reference.
+
+Planned handwritten kernels:
+
+- `naive`: one output element per thread.
+- `tiled`: use Metal `threadgroup` memory to improve input reuse.
+- `register_tiled`: compute multiple output elements per thread.
+- `simdgroup`: use SIMD-group / matrix primitives where possible.
+
+## Benchmark plan
+
+We benchmark many matrix sizes (`M x N x K`) instead of only one square matrix. Different shapes stress different parts of the GPU.
+
+- **Powers of 2 / square**: `M=N=K`, useful as a clean baseline.
+- **FFN layers**: transformer feed-forward shapes, usually large and compute-heavy.
+- **Attention layers**: sequence-length GEMMs with relatively small head dimensions.
+- **Skinny matrices**: small `K`, often more memory-bandwidth sensitive.
+- **Odd / non-ideal sizes**: dimensions not divisible by tile sizes, useful for testing boundary handling.
+
+The benchmark harness records runtime, GFLOP/s, estimated bandwidth, arithmetic intensity, and correctness error.
+
+## Roofline model
+
+For a GEMM `C = A @ B` with dimensions `(M, K) @ (K, N)`:
+
+- multiply-add operations: `M * N * K`
+- FLOPs, counting one FMA as two operations: `2 * M * N * K`
+- ideal input elements: `(M * K) + (N * K)`
+- output elements: `M * N`
+- ideal total elements moved: `(M * K) + (N * K) + (M * N)`
+
+Reference-style arithmetic intensity [^3]:
+
+```text
+ops per input element  = (M * N * K) / ((M * K) + (N * K))
+                       = (M * N) / (M + N)
+
+ops per output element = (M * N * K) / (M * N)
+                       = K
+
+ops per total element  = (M * N * K) / ((M * K) + (N * K) + (M * N))
+```
+
+For roofline plots, this repo also reports FLOP/byte using the ideal FP32 traffic estimate. This assumes perfect input reuse: each input element is loaded from device memory once and reused from cache/threadgroup memory after that. Real kernels only approach this with careful tiling.
 
 ## Get it running
 
->[!IMPORTANT]
->You'll need **a Mac** with an **M-series chip**.
+> [!IMPORTANT]
+> You'll need **a Mac with an M-series chip**.
 
-### 1. Installation
+This project uses [`uv`](https://docs.astral.sh/uv/) and MLX.
 
-If you don't have [Homebrew](https://brew.sh/), get it. Then:
 ```bash
-brew install cmake make llvm@20
+uv sync
 ```
-
->[!NOTE]
->We need `llvm`'s clang because Apple's default one can be a bit... quirky. Note that `llvm` newest version (21) cannot work on our code properly so we choose version 20.
-
-### 2. Build the thing
-
-Pop open a terminal and run these:
-```bash
-# Make a home for the benchmark results
-mkdir -p outputs
-
-# Let CMake do its magic. This points to the new clang we just installed.
-cmake -S . -B build -G "Unix Makefiles" \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_C_COMPILER=$(brew --prefix llvm@20)/bin/clang \
-      -DCMAKE_CXX_COMPILER=$(brew --prefix llvm@20)/bin/clang++
-
-# Fire the lasers!
-cmake --build build
-```
-If that all worked, you'll have a shiny new executable at `build/bin/gemm`.
 
 ## Run the benchmark
 
+List available kernels:
+
 ```bash
-# It's easy, just tell it which kernel to run
-./build/bin/gemm naive
+uv run gemm-metal list-kernels
 ```
 
-The program will spit out performance numbers to your console and also save a detailed `.csv` file in the `outputs` folder. This is the good stuff you can use to make pretty graphs in Python.
+Validate a kernel against `mlx.matmul`:
 
-**Available kernels:**
-- `naive`: The humble beginning. 
-- `tile_16` and `tile_32`: Tiling kernel with different tile sizes.
-- `tile_threads`: Tiling kernel with more work on threads.
-- `tile_simdgroup`: Tiling kernel with `simdgroup` (metal intrinsics).
+```bash
+uv run gemm-metal validate --kernel mlx --M 128 --N 128 --K 128
+```
 
-## The Optimization Checklist
+Run the benchmark suite:
 
-This project is structured so you can follow the optimization journey step-by-step. Each new kernel will be a separate file, building on the lessons of the last.
+```bash
+uv run gemm-metal bench --kernel mlx
+```
 
-- [x] **Chapter 0: The Setup** Build a solid, memory-safe C++ framework with a real benchmark harness. No segfaults allowed.
-- [x] **Chapter 1: The Tiling** The first real optimization. Use that sweet, sweet shared memory or SMEM (`threadgroup` in Metal, `__shared__` in CUDA) to stop hitting DRAM so much. This is where we should see the first big performance jump.
-- [x] **Chapter 2: More Work, Less Laziness (Register Tiling)** Make each thread compute a small 2x2 or 4x4 block of the output matrix. This increases register reuse and hides instruction latency.
-- [x] **Chapter 3: Embracing the Hardware (SIMD-group Matrix Primitives)** This is the game-changer. We stop thinking in scalar operations (a * b) and start thinking in matrices. We'll use Metal's `simdgroup` to command the M2's matrix acceleration hardware (Apple's equivalent of Tensor Cores).
+Benchmark a custom kernel. The production `mlx.matmul` baseline is always included in the same output file for comparison:
 
-## Analysis
+```bash
+uv run gemm-metal bench --kernel naive
+```
 
-### Chapter 0: Naive GEMM
+The script wrapper does the same thing:
 
-### Chapter 1: The tiling
+```bash
+uv run python scripts/bench.py --kernel mlx
+```
 
-#### Why we need tiling ?
+Generate a Markdown report from benchmark CSV files:
 
-> [!CAUTION]
-> TODO
+```bash
+uv run python scripts/report.py
+```
 
-#### Why is `tile_16` Faster Than `tile_32`?
+Generate simple HTML plots:
 
-This result is counter-intuitive at first. A larger tile size like 32x32 should mean more data reuse within the fast `threadgroup` memory (or *shared memory*), which is usually good for performance. However, it's slower. Why?
+```bash
+uv run python scripts/plot_kernel_comparison.py
+uv run python scripts/plot_roofline.py
+```
 
-The answer is **Occupancy**.
+Benchmark outputs live under `outputs/`.
 
-1.  **What is Occupancy?** Occupancy is the ratio of active threadgroups (or warps) to the maximum number of threadgroups that can run on a single GPU compute unit (CU) (or an SM in CUDA device). High occupancy is critical for hiding memory latency. When one group of threads is stalled waiting for data to arrive from the slow device memory (DRAM), the GPU scheduler can switch to another *resident* group and keep the compute units busy.
+## The optimization checklist
 
-2.  **Resource Limits:** A CU has a fixed amount of resources, including registers and, most importantly for this case, `threadgroup` memory.
-- `tile_16` kernel:
-      - Threadgroup size: 16x16 = 256 threads.
-      - `threadgroup` memory used: `(16*16 + 16*16) * 4 bytes = 2048 bytes`.
-- `tile_32` kernel:
-      - Threadgroup size: 32x32 = 1024 threads.
-      - `threadgroup` memory used: `(32*32 + 32*32) * 4 bytes = 8192 bytes`.
+This project is structured so you can follow the optimization journey step by step. Each new kernel should be a separate chapter and a separate implementation.
 
-3.  **The Bottleneck:** The M2 GPU's CUs have a limited amount of `threadgroup` memory (32 KB) [^3]. The `tile_32` kernel's 8KB memory footprint is significant. If a single threadgroup consumes too large a chunk of the CU's available memory, the scheduler cannot fit as many *concurrent* threadgroups onto that CU.
+- [x] **Chapter 0: The Python + MLX setup** Build a clean benchmark harness with correctness checks and reproducible outputs (Thanks Codex).
+- [ ] **Chapter 1: Naive GEMM** One output element per thread. The humble beginning.
+- [ ] **Chapter 2: Tiling** Use `threadgroup` memory, the Metal equivalent of CUDA shared memory, to reduce device-memory traffic.
+- [ ] **Chapter 3: More work per thread / register tiling** Compute small output blocks per thread to increase reuse and hide latency.
+- [ ] **Chapter 4: SIMD-group matrix primitives** Use Metal SIMD-group features where MLX custom kernels allow it.
+- [ ] **Chapter 5: Better analysis** Roofline plots, shape-family comparisons, and performance reports.
+- [ ] **Chapter 6: Beyond GEMM** Try custom backward kernels, attention, and maybe a FlashAttention-style kernel.
 
-With `tile_32`, you might only be able to fit one or two threadgroups per CU, leading to low occupancy. If those few groups stall on a memory read, there are no other resident groups to switch to, and the expensive ALU units sit idle.
+## Kernel philosophy
 
-The `tile_16` kernel, with its much smaller 2KB footprint, allows many more threadgroups to be resident on the CU simultaneously. This gives the scheduler a large pool of work to choose from, effectively hiding memory latency and keeping the hardware busy.horrors.
+MLX custom Metal kernels are defined from a Metal **function body string**. MLX generates the function signature.
 
-### Chapter 2: More work on threads
+The handwritten kernel body and launch choices are the main learning artifacts in this repo. Each kernel file should own its own `mx.fast.metal_kernel(...)` setup: input names, output names, templates, grid size, threadgroup size, output shapes, and dtypes. Tooling and agents may help with scaffolding, benchmark code, validation, and reports, but the actual kernel bodies and launch parameters should be written by hand.
 
-> [!CAUTION]
-> TODO
-
-### Chapter 3: SIMD Tilegroup
-
-> [!CAUTION]
-> TODO
+See `AGENTS.md` for detailed contributor/agent instructions.
 
 ## Resources
 
+- [MLX custom Metal kernels](https://ml-explore.github.io/mlx/build/html/dev/custom_metal_kernels.html)
 - [siboehm's CUDA Matrix Optimization](https://siboehm.com/articles/22/CUDA-MMM)
-- [OpenCL SGEMM Tutorial](https://cnugteren.github.io/tutorial/pages/page1.html)
-- [Cuda C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/)
+- [CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/)
 - [Metal Shading Language Specification](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)
 - [metal_performance_testing by bkvogel](https://github.com/bkvogel/metal_performance_testing)
 - [metal_flash_attention by philipturner](https://github.com/philipturner/metal-flash-attention/tree/main)
+- [Outperforming cuBLAS on H100: a Worklog](https://cudaforfun.substack.com/p/outperforming-cublas-on-h100-a-worklog)
 
 [^1]: https://www.cpu-monkey.com/en/cpu-apple_m2_8_gpu
 [^2]: https://github.com/philipturner/metal-benchmarks
-[^3]: https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf
+[^3]: https://developer.apple.com/download/files/Metal-Performance-Primitives-Programming-Guide.pdf
