@@ -1,6 +1,5 @@
-# ❤️  Written by Codex
-"""GEMM Metal learning project using Python + MLX."""
+"""Small MLX + Metal kernel experiments."""
 
-from .cli import main
+from gemm_metal.main import main
 
 __all__ = ["main"]

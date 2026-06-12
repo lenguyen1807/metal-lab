@@ -1,7 +1,7 @@
 [project]
 name = "gemm-metal"
 version = "0.1.0"
-description = "Add your description here"
+description = "Small MLX custom Metal kernel experiments"
 readme = "README.md"
 authors = [
     { name = "Nguyen", email = "lenguyen18072003@gmail.com" }
