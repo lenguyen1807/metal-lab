@@ -1,6 +1,19 @@
 [project]
 name = "gemm-metal"
 version = "0.1.0"
+description = "Small MLX custom Metal kernel experiments"
 readme = "README.md"
-requires-python = ">=3.10"
-dependencies = ["numpy>=2.2.4", "pandas>=2.2.3", "plotly>=6.0.1"]
+authors = [
+    { name = "Nguyen", email = "lenguyen18072003@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "mlx>=0.31.2",
+]
+
+[project.scripts]
+gemm-metal = "gemm_metal:main"
+
+[build-system]
+requires = ["uv_build>=0.11.15,<0.12.0"]
+build-backend = "uv_build"

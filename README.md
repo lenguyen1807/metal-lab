@@ -1,137 +1,189 @@
-# A journey to ~2.84 TFLOPs on my M2 MacBook
+# metal-kernel-notes
 
-This is a diary of my journey to write a fast single-floating point (FP32) matrix multiplication (SGEMM) kernel on my Apple M2 laptop. Since I don't have an NVIDIA card lying around, I'm using Apple's **Metal** API instead of CUDA. The core ideas are the same: making GEMM as fast as possible. 
+Small MLX custom Metal kernel experiments on Apple Silicon.
 
-The theoretical FP32 peak of a 8-core M2 is **~2.84 TFLOPs** (or 2840 GFLOPS) [^1] [^2]. Can we even get close? Let's find out.
+The project is organized like a compact CUDA learning repo: each operator keeps
+its handwritten kernels in `ops/`, and each operator has a matching benchmark
+spec in `bench/`.
 
-This repo is for anyone who wants to learn GPU optimization but don't have NVIDA GPU like me. The code is (a little bit) clean, and built with modern C++ so we don't leak memory all over the place (and shoot our foot in place).
+## Layout
 
-## How fast are we so far?
-
-| Kernel | Best performance (GFLOPS) | % of peak performance (2840 GLOPS) |
-|--------|---------------------------|---|
-| `naive` | $\approx 178$ | $\approx 6.26$% |
-| `tile_16` | $\approx 269$ | $\approx 9.12$% |
-| `tile_32` | $\approx 195$ | $\approx 6.86$% |
-| `tile_threads` | $\approx 359$ | $\approx 12.6$% |
-| `tile_simdgroup` | $\approx 421$ | $\approx 14.8$% |
-
-We will conduct benchmarking on vary matrix sizes (`M x N x K`) to represent real-world scenarios then the final GLFOPS is the mean of all benchmarking tests.
-- **Powers of 2 - Square** (for baseline): `M=N=K` and vary from `512` to `4096`.
-- **FFN Layers** (compute-bound): Simulates the feed-forward networks in Transformers (e.g., Llama, GPT). These are typically compute-bound due to the large inner dimension (K) (`K >> M` and `K >> N`).
-- **Attention Layers**: small `K`. For a signel attention head, the GEMM is `(seq_len, head_dim)` and `head_dim` is small compared with `seq_len`.
-- **Skinny Matrices**: with really small `K`. These stress memory bandwidth. The kernel spends more time loading data than computing. GFLOPS will be significantly lower here.
-- **Non-ideal size**: test the kernel's handling of edge cases and non-ideal dimensions.
-
-## Get it running
-
->[!IMPORTANT]
->You'll need **a Mac** with an **M-series chip**.
-
-### 1. Installation
-
-If you don't have [Homebrew](https://brew.sh/), get it. Then:
-```bash
-brew install cmake make llvm@20
+```text
+src/gemm_metal/
+  main.py
+  ops/
+    vadd.py
+    gemm.py
+  bench/
+    common.py
+    vadd.py
+    gemm.py
+scripts/
+  bench.py
+outputs/
+  raw/
 ```
 
->[!NOTE]
->We need `llvm`'s clang because Apple's default one can be a bit... quirky. Note that `llvm` newest version (21) cannot work on our code properly so we choose version 20.
-
-### 2. Build the thing
-
-Pop open a terminal and run these:
-```bash
-# Make a home for the benchmark results
-mkdir -p outputs
-
-# Let CMake do its magic. This points to the new clang we just installed.
-cmake -S . -B build -G "Unix Makefiles" \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_C_COMPILER=$(brew --prefix llvm@20)/bin/clang \
-      -DCMAKE_CXX_COMPILER=$(brew --prefix llvm@20)/bin/clang++
-
-# Fire the lasers!
-cmake --build build
-```
-If that all worked, you'll have a shiny new executable at `build/bin/gemm`.
-
-## Run the benchmark
+## Setup
 
 ```bash
-# It's easy, just tell it which kernel to run
-./build/bin/gemm naive
+uv sync
+uv run gemm-metal list
 ```
 
-The program will spit out performance numbers to your console and also save a detailed `.csv` file in the `outputs` folder. This is the good stuff you can use to make pretty graphs in Python.
+## Kernels
 
-**Available kernels:**
-- `naive`: The humble beginning. 
-- `tile_16` and `tile_32`: Tiling kernel with different tile sizes.
-- `tile_threads`: Tiling kernel with more work on threads.
-- `tile_simdgroup`: Tiling kernel with `simdgroup` (metal intrinsics).
+```text
+vadd
+  mlx       MLX elementwise add baseline
+  metal     one Metal thread per element
 
-## The Optimization Checklist
+gemm
+  mlx       MLX matmul baseline
+  simt      naive CUDA-style GEMM, one thread per C element
+  tiled16   threadgroup-memory tiled GEMM, 16x16 output tile
+  tiled32   threadgroup-memory tiled GEMM, 32x32 output tile
+  simdgroup SIMD-group matrix GEMM, threadgroup computes 32x16 output tile
+```
 
-This project is structured so you can follow the optimization journey step-by-step. Each new kernel will be a separate file, building on the lessons of the last.
+The GEMM kernels intentionally use CUDA-like naming in the Metal body:
 
-- [x] **Chapter 0: The Setup** Build a solid, memory-safe C++ framework with a real benchmark harness. No segfaults allowed.
-- [x] **Chapter 1: The Tiling** The first real optimization. Use that sweet, sweet shared memory or SMEM (`threadgroup` in Metal, `__shared__` in CUDA) to stop hitting DRAM so much. This is where we should see the first big performance jump.
-- [x] **Chapter 2: More Work, Less Laziness (Register Tiling)** Make each thread compute a small 2x2 or 4x4 block of the output matrix. This increases register reuse and hides instruction latency.
-- [x] **Chapter 3: Embracing the Hardware (SIMD-group Matrix Primitives)** This is the game-changer. We stop thinking in scalar operations (a * b) and start thinking in matrices. We'll use Metal's `simdgroup` to command the M2's matrix acceleration hardware (Apple's equivalent of Tensor Cores).
+```text
+threadgroup_position_in_grid      -> block position
+thread_position_in_threadgroup    -> thread position
+```
 
-## Analysis
+## GEMM Kernel Notes
 
-### Chapter 0: Naive GEMM
+`simt`:
 
-### Chapter 1: The tiling
+```text
+C[row, col] = sum_k A[row, k] * B[k, col]
+```
 
-#### Why we need tiling ?
+`tiled16` and `tiled32`:
 
-> [!CAUTION]
-> TODO
+```text
+load A/B tiles into threadgroup memory
+synchronize
+accumulate one C element per thread
+```
 
-#### Why is `tile_16` Faster Than `tile_32`?
+`simdgroup`:
 
-This result is counter-intuitive at first. A larger tile size like 32x32 should mean more data reuse within the fast `threadgroup` memory (or *shared memory*), which is usually good for performance. However, it's slower. Why?
+```text
+256 threads per threadgroup
+8 SIMD-groups per threadgroup
+each SIMD-group computes one 8x8 C tile
+the threadgroup computes a 32x16 C tile
+```
 
-The answer is **Occupancy**.
+The current SIMD-group kernel requires `M`, `N`, and `K` to be divisible by 8.
+Unsupported benchmark cases are skipped.
 
-1.  **What is Occupancy?** Occupancy is the ratio of active threadgroups (or warps) to the maximum number of threadgroups that can run on a single GPU compute unit (CU) (or an SM in CUDA device). High occupancy is critical for hiding memory latency. When one group of threads is stalled waiting for data to arrive from the slow device memory (DRAM), the GPU scheduler can switch to another *resident* group and keep the compute units busy.
+## Benchmark Commands
 
-2.  **Resource Limits:** A CU has a fixed amount of resources, including registers and, most importantly for this case, `threadgroup` memory.
-- `tile_16` kernel:
-      - Threadgroup size: 16x16 = 256 threads.
-      - `threadgroup` memory used: `(16*16 + 16*16) * 4 bytes = 2048 bytes`.
-- `tile_32` kernel:
-      - Threadgroup size: 32x32 = 1024 threads.
-      - `threadgroup` memory used: `(32*32 + 32*32) * 4 bytes = 8192 bytes`.
+Validate:
 
-3.  **The Bottleneck:** The M2 GPU's CUs have a limited amount of `threadgroup` memory (32 KB) [^3]. The `tile_32` kernel's 8KB memory footprint is significant. If a single threadgroup consumes too large a chunk of the CU's available memory, the scheduler cannot fit as many *concurrent* threadgroups onto that CU.
+```bash
+uv run gemm-metal validate vadd --kernel metal
+uv run gemm-metal validate gemm --kernel simt
+uv run gemm-metal validate gemm --kernel tiled16
+uv run gemm-metal validate gemm --kernel tiled32
+uv run gemm-metal validate gemm --kernel simdgroup
+```
 
-With `tile_32`, you might only be able to fit one or two threadgroups per CU, leading to low occupancy. If those few groups stall on a memory read, there are no other resident groups to switch to, and the expensive ALU units sit idle.
+Benchmark square GEMM:
 
-The `tile_16` kernel, with its much smaller 2KB footprint, allows many more threadgroups to be resident on the CU simultaneously. This gives the scheduler a large pool of work to choose from, effectively hiding memory latency and keeping the hardware busy.horrors.
+```bash
+uv run gemm-metal bench gemm --kernel simt --suite square
+uv run gemm-metal bench gemm --kernel tiled16 --suite square
+uv run gemm-metal bench gemm --kernel tiled32 --suite square
+uv run gemm-metal bench gemm --kernel simdgroup --suite square
+```
 
-### Chapter 2: More work on threads
+Benchmark broader or heavier suites:
 
-> [!CAUTION]
-> TODO
+```bash
+uv run gemm-metal bench gemm --kernel simt --suite full
+uv run gemm-metal bench gemm --kernel simdgroup --suite full
+uv run gemm-metal bench gemm --kernel simt --suite stress --iterations 3
+uv run gemm-metal bench gemm --kernel mlx --suite extreme --iterations 3
+```
 
-### Chapter 3: SIMD Tilegroup
+The script wrapper exposes the same command:
 
-> [!CAUTION]
-> TODO
+```bash
+uv run python scripts/bench.py bench gemm --kernel tiled16 --suite square
+```
 
-## Resources
+When a custom kernel is benchmarked, the MLX baseline is included first in the
+same output.
 
-- [siboehm's CUDA Matrix Optimization](https://siboehm.com/articles/22/CUDA-MMM)
-- [OpenCL SGEMM Tutorial](https://cnugteren.github.io/tutorial/pages/page1.html)
-- [Cuda C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/)
-- [Metal Shading Language Specification](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)
-- [metal_performance_testing by bkvogel](https://github.com/bkvogel/metal_performance_testing)
-- [metal_flash_attention by philipturner](https://github.com/philipturner/metal-flash-attention/tree/main)
+## Suites
 
-[^1]: https://www.cpu-monkey.com/en/cpu-apple_m2_8_gpu
-[^2]: https://github.com/philipturner/metal-benchmarks
-[^3]: https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf
+```text
+square   square GEMMs from 256 to 2048, for headline comparisons
+full     square, FFN-like, attention-like, skinny/wide/tall, and odd cases
+stress   intentionally large GEMM cases
+extreme  very large model-like cases; best for MLX or optimized kernels first
+```
+
+`stress` and `extreme` can be slow for naive kernels. Start with low iteration
+counts.
+
+## Metrics
+
+Each CSV row records:
+
+```text
+timestamp
+op, kernel, case, family, shape
+warmups, iterations
+mean/median/min/max/std runtime
+GFLOP/s
+estimated bandwidth
+arithmetic intensity
+max/mean absolute error
+Python version
+MLX version
+```
+
+Timing excludes input allocation/setup. The runner warms up first, times only
+kernel execution, and forces MLX evaluation with `mx.eval(...)`.
+
+## Reporting
+
+Do not average GFLOP/s across unrelated shapes. A single average hides whether a
+kernel is good at square GEMM, skinny GEMM, attention-like GEMM, or odd boundary
+cases.
+
+Prefer:
+
+```text
+case | shape | MLX GFLOP/s | custom GFLOP/s | custom / MLX | max error
+```
+
+Then group results by family:
+
+```text
+square
+FFN-like
+attention-like
+skinny/wide/tall
+odd sizes
+```
+
+Use the large `square` suite for headline numbers, and use `full` to explain
+where a kernel works or breaks down. A median custom/MLX ratio within one family
+is useful as a secondary summary, but it should not replace the per-shape table.
+
+## Roadmap
+
+1. Vector add.
+2. GEMM SIMT naive.
+3. GEMM tiled.
+4. GEMM SIMD-group.
+5. Reduction sum.
+6. Softmax.
+7. Attention.
