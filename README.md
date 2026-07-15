@@ -1,28 +1,28 @@
-# metal-kernel-notes
+# gemm-metal
 
 Small MLX custom Metal kernel experiments on Apple Silicon.
 
-The project is organized like a compact CUDA learning repo: each operator keeps
-its handwritten kernels in `ops/`, and each operator has a matching benchmark
-spec in `bench/`.
-
-## Layout
+The project mirrors the cuda-lab structure:
 
 ```text
 src/gemm_metal/
   main.py
-  ops/
-    vadd.py
-    gemm.py
-  bench/
-    common.py
-    vadd.py
-    gemm.py
-scripts/
-  bench.py
-outputs/
-  raw/
+  harness/
+    bench.py
+    check.py
+  kernels/
+    utils.py
+    02_matmul/
+      bench.py
+      test.py
+      reference.py
+      naive.py
+      tiled.py
 ```
+
+`harness/` contains reusable benchmark and correctness helpers. Each folder under
+`kernels/` owns its reference implementation, tests, benchmark script, and Metal
+kernel wrappers.
 
 ## Setup
 
@@ -31,159 +31,92 @@ uv sync
 uv run gemm-metal list
 ```
 
-## Kernels
+## Matrix Multiplication
 
-```text
-vadd
-  mlx       MLX elementwise add baseline
-  metal     one Metal thread per element
-
-gemm
-  mlx       MLX matmul baseline
-  simt      naive CUDA-style GEMM, one thread per C element
-  tiled16   threadgroup-memory tiled GEMM, 16x16 output tile
-  tiled32   threadgroup-memory tiled GEMM, 32x32 output tile
-  simdgroup SIMD-group matrix GEMM, threadgroup computes 32x16 output tile
-```
-
-The GEMM kernels intentionally use CUDA-like naming in the Metal body:
-
-```text
-threadgroup_position_in_grid      -> block position
-thread_position_in_threadgroup    -> thread position
-```
-
-## GEMM Kernel Notes
-
-`simt`:
-
-```text
-C[row, col] = sum_k A[row, k] * B[k, col]
-```
-
-`tiled16` and `tiled32`:
-
-```text
-load A/B tiles into threadgroup memory
-synchronize
-accumulate one C element per thread
-```
-
-`simdgroup`:
-
-```text
-256 threads per threadgroup
-8 SIMD-groups per threadgroup
-each SIMD-group computes one 8x8 C tile
-the threadgroup computes a 32x16 C tile
-```
-
-The current SIMD-group kernel requires `M`, `N`, and `K` to be divisible by 8.
-Unsupported benchmark cases are skipped.
-
-## Benchmark Commands
-
-Validate:
+Run correctness tests:
 
 ```bash
-uv run gemm-metal validate vadd --kernel metal
-uv run gemm-metal validate gemm --kernel simt
-uv run gemm-metal validate gemm --kernel tiled16
-uv run gemm-metal validate gemm --kernel tiled32
-uv run gemm-metal validate gemm --kernel simdgroup
+uv run gemm-metal test 02_matmul
 ```
 
-Benchmark square GEMM:
+Run benchmarks:
 
 ```bash
-uv run gemm-metal bench gemm --kernel simt --suite square
-uv run gemm-metal bench gemm --kernel tiled16 --suite square
-uv run gemm-metal bench gemm --kernel tiled32 --suite square
-uv run gemm-metal bench gemm --kernel simdgroup --suite square
+uv run gemm-metal bench 02_matmul --kernel naive
+uv run gemm-metal bench 02_matmul --kernel tiled_16
+uv run gemm-metal bench 02_matmul --kernel tiled_32
 ```
 
-Benchmark broader or heavier suites:
+Every matmul implementation takes explicit `M`, `N`, and `K`:
 
-```bash
-uv run gemm-metal bench gemm --kernel simt --suite full
-uv run gemm-metal bench gemm --kernel simdgroup --suite full
-uv run gemm-metal bench gemm --kernel simt --suite stress --iterations 3
-uv run gemm-metal bench gemm --kernel mlx --suite extreme --iterations 3
+```python
+C = matmul_naive(A, B, M, N, K)
 ```
 
-The script wrapper exposes the same command:
+### Metal Launch Indexing
 
-```bash
-uv run python scripts/bench.py bench gemm --kernel tiled16 --suite square
-```
+The naive kernel uses CUDA-like names in the Metal body, but MLX's Metal launch
+contract is not the same as CUDA's launch syntax.
 
-When a custom kernel is benchmarked, the MLX baseline is included first in the
-same output.
-
-## Suites
+CUDA usually launches with:
 
 ```text
-square   square GEMMs from 256 to 2048, for headline comparisons
-full     square, FFN-like, attention-like, skinny/wide/tall, and odd cases
-stress   intentionally large GEMM cases
-extreme  very large model-like cases; best for MLX or optimized kernels first
+grid  = number of blocks
+block = threads per block
 ```
 
-`stress` and `extreme` can be slow for naive kernels. Start with low iteration
-counts.
-
-## Metrics
-
-Each CSV row records:
+MLX `mx.fast.metal_kernel` launches with:
 
 ```text
-timestamp
-op, kernel, case, family, shape
-warmups, iterations
-mean/median/min/max/std runtime
-GFLOP/s
-estimated bandwidth
-arithmetic intensity
-max/mean absolute error
-Python version
-MLX version
+grid        = total thread grid
+threadgroup = threads per threadgroup
 ```
 
-Timing excludes input allocation/setup. The runner warms up first, times only
-kernel execution, and forces MLX evaluation with `mx.eval(...)`.
-
-## Reporting
-
-Do not average GFLOP/s across unrelated shapes. A single average hides whether a
-kernel is good at square GEMM, skinny GEMM, attention-like GEMM, or odd boundary
-cases.
-
-Prefer:
+So this CUDA-style launch:
 
 ```text
-case | shape | MLX GFLOP/s | custom GFLOP/s | custom / MLX | max error
+grid=(blocks_x, blocks_y)
+block=(16, 16)
 ```
 
-Then group results by family:
+is represented in this project as:
 
 ```text
-square
-FFN-like
-attention-like
-skinny/wide/tall
-odd sizes
+threadgroup=(256, 1, 1)
+grid=(blocks_x * 256, blocks_y, 1)
 ```
 
-Use the large `square` suite for headline numbers, and use `full` to explain
-where a kernel works or breaks down. A median custom/MLX ratio within one family
-is useful as a secondary summary, but it should not replace the per-shape table.
+Inside the kernel:
 
-## Roadmap
+```text
+threadgroup_position_in_grid.x -> logical block_x
+threadgroup_position_in_grid.y -> logical block_y
+thread_position_in_threadgroup.x -> flat local thread id
+```
 
-1. Vector add.
-2. GEMM SIMT naive.
-3. GEMM tiled.
-4. GEMM SIMD-group.
-5. Reduction sum.
-6. Softmax.
-7. Attention.
+The flat local thread id is converted back to a logical 16x16 tile index:
+
+```text
+thread_x = thread_id % 16
+thread_y = thread_id / 16
+```
+
+Your SIMD-group comparison is still the right mental model:
+
+```text
+Metal threadgroup ~= CUDA block
+Metal SIMD-group  ~= CUDA warp
+```
+
+The difference above is about the MLX Python launch API: its `grid` parameter is
+the full Metal thread grid, not CUDA's number of blocks.
+
+Shared validation lives in `gemm_metal.kernels.utils` and checks:
+
+- `M`, `N`, and `K` are positive integers.
+- `A` and `B` are 2D MLX arrays.
+- `A` has shape `(M, K)`.
+- `B` has shape `(K, N)`.
+- `A` and `B` use the same supported dtype.
+
+The current kernels support `mx.float32`.
