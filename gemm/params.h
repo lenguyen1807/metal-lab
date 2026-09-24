@@ -7,11 +7,7 @@ constexpr int PFIRST = 256;
 constexpr int PLAST = 3840;
 constexpr int PINC = 128;
 
-// https://github.com/philipturner/metal-benchmarks?tab=readme-ov-file#operations-per-second
-constexpr float M2_GPU_GHZ = 1.398f;
-
 constexpr int BENCHMARK_TIME = 20;
-constexpr float EQUAL_EPSILON = 1e-5f;
 
 struct MatmulParams
 {

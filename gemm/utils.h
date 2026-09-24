@@ -1,8 +1,15 @@
 #pragma once
 
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <limits>
 #include <ostream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 
 #include "gemm/matrix.h"
@@ -58,8 +65,9 @@ public:
       , special_chars_("\"")
   {
     fs_.exceptions(std::ios::failbit | std::ios::badbit);
+    std::filesystem::create_directories(OUTPUTS_PATH);
     fs_.open(std::string(OUTPUTS_PATH) + filename,
-             std::fstream::in | std::fstream::out | std::fstream::trunc);
+             std::fstream::out | std::fstream::trunc);
   }
 
   ~CSVWriter()
@@ -130,20 +138,19 @@ inline static CSVWriter& flush(CSVWriter& file)
   return file;
 }
 
-inline float matmul_time_to_gflops(float rows,
-                                   float cols,
-                                   float inner_dim,
-                                   float microsecs)
+inline double matmul_time_to_gflops(double rows,
+                                    double cols,
+                                    double inner_dim,
+                                    double milliseconds)
 {
-  float FLOPS = 2 * rows * cols * inner_dim;
-  return FLOPS / (microsecs * 1e6);
+  return 2.0 * rows * cols * inner_dim / (milliseconds * 1e6);
 }
 
 inline void matmul_cpu(const HostMatrix& A, const HostMatrix& B, HostMatrix& C)
 {
   assert(A.cols == B.rows);
   assert(C.cols == B.cols);
-  assert(C.rows = A.rows);
+  assert(C.rows == A.rows);
 
   uint M = C.rows;
   uint N = C.cols;
@@ -155,32 +162,38 @@ inline void matmul_cpu(const HostMatrix& A, const HostMatrix& B, HostMatrix& C)
 
   for (uint i = 0; i < M; ++i) {
     for (uint j = 0; j < N; ++j) {
+      double sum = 0.0;
       for (uint p = 0; p < K; ++p) {
-        C[i * LDC + j] += (A[i * LDA + p] * B[p * LDB + j]);
+        sum += static_cast<double>(A[i * LDA + p]) * B[p * LDB + j];
       }
+      C[i * LDC + j] = static_cast<float>(sum);
     }
   }
 }
 
-inline bool equals(const HostMatrix& A, const HostMatrix& B)
+struct Comparison
 {
-  assert(A.cols == B.cols);
-  assert(B.rows == A.rows);
+  size_t mismatches = 0;
+  double max_abs_error = 0.0;
+};
 
-  uint rows = A.rows;
-  uint cols = A.cols;
+inline Comparison compare(const HostMatrix& actual, const HostMatrix& expected)
+{
+  assert(actual.cols == expected.cols);
+  assert(actual.rows == expected.rows);
 
-  for (size_t i = 0; i < rows * cols; ++i) {
-    float a = A[i];
-    float b = B[i];
-    bool is_approx_equal = fabs(a - b)
-        <= ((fabs(a) < fabs(b) ? fabs(b) : fabs(a)) * EQUAL_EPSILON);
-    if (!is_approx_equal) {
-      return false;
+  Comparison result;
+  const size_t count = actual.rows * actual.cols;
+
+  for (size_t i = 0; i < count; ++i) {
+    const double error = std::abs(static_cast<double>(actual[i]) - expected[i]);
+    result.max_abs_error = std::max(result.max_abs_error, error);
+    if (!std::isfinite(actual[i])
+        || error > 1e-3 + 1e-3 * std::abs(expected[i])) {
+      ++result.mismatches;
     }
   }
-
-  return true;
+  return result;
 }
 
 inline void copy(const HostMatrix& src, DeviceMatrix& dst)

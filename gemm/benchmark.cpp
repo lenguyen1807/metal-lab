@@ -1,209 +1,175 @@
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
+#include "Foundation/NSAutoreleasePool.hpp"
+#include "Metal/MTLCommandBuffer.hpp"
 #include "Metal/MTLComputeCommandEncoder.hpp"
-#include "Metal/MTLComputePass.hpp"
-#include "Metal/MTLTypes.hpp"
-#include "benchmark.h"
+#include "gemm/benchmark.h"
 #include "gemm/kernel.h"
 #include "gemm/matrix.h"
+#include "gemm/metal_mgr.h"
+#include "gemm/mps_gemm.h"
 #include "gemm/params.h"
 #include "gemm/utils.h"
 
-BenchmarkMgr::BenchmarkMgr()
-{
-  try {
-    metal_ = std::make_unique<MetalMgr>();
-    for (const auto& name : OPT_NAME) {
-      kernels_[name] = std::make_unique<Kernel>(name, metal_->device);
-    }
-  } catch (...) {
-    throw;
-  }
-}
+BenchmarkMgr::BenchmarkMgr() : ctx_(std::make_unique<MetalContext>()) {}
+BenchmarkMgr::~BenchmarkMgr() = default;
 
-BenchmarkMgr::~BenchmarkMgr()
+void BenchmarkMgr::run_benchmark_suite(const std::string& kernel_name,
+                                       bool smoke)
 {
-  kernels_.clear();
-}
-
-void BenchmarkMgr::run_benchmark_suite(const std::string& kernel_name)
-{
-  auto kernel_iter = kernels_.find(kernel_name);
-  if (kernel_iter == kernels_.end()) {
-    throw std::runtime_error("Kernel not found: " + kernel_name);
+  if (kernel_name != "naive" && kernel_name != "mps") {
+    throw std::invalid_argument("Unknown kernel: " + kernel_name);
   }
 
-  Kernel* kernel = kernel_iter->second.get();
-  std::cout << "\n--- Running Benchmark Suite for Kernel: " << kernel_name
-            << " ---\n";
+  std::unique_ptr<Kernel> kernel;
+  if (kernel_name == "naive") {
+    kernel = std::make_unique<Kernel>(kernel_name, ctx_->device.get());
+  }
 
-  // Write headers to the CSV file
-  kernel->writer() << "M" << "N" << "K" << "Time (ms)" << "GFLOPS" << endrow;
+  CSVWriter writer(kernel_name + (smoke ? "_smoke.csv" : ".csv"));
+  writer << "M" << "N" << "K" << "Time (ms)" << "GFLOPS"
+         << "Max abs error" << endrow;
 
-  for (const auto& shape : BENCHMARK_SHAPES) {
-    const size_t M = shape.M;
-    const size_t N = shape.N;
-    const size_t K = shape.K;
+  const std::vector<GemmShape> smoke_shapes = {
+      {1, 1, 1}, {7, 13, 5}, {17, 31, 9}, {32, 32, 32},
+      {65, 37, 33}, {257, 263, 255}};
+  const auto& shapes = smoke ? smoke_shapes : BENCHMARK_SHAPES;
 
-    std::cout << "Benchmarking shape (M, N, K): (" << M << ", " << N << ", "
-              << K << ")... ";
+  std::cout << "Running " << kernel_name << (smoke ? " smoke" : " benchmark")
+            << " on " << ctx_->device->name()->utf8String() << "\n";
 
-    /* ----- Setup ------ */
-    // 1. Create matrices on the HOST using HostMatrix
+  for (const auto& shape : shapes) {
+    const size_t M = shape.M, N = shape.N, K = shape.K;
     HostMatrix A = HostMatrix::random(0.f, 1.f, M, K);
     HostMatrix B = HostMatrix::random(0.f, 1.f, K, N);
-
-    // 2. Allocate matrices on the DEVICE
-    DeviceMatrix d_A(metal_->device, M, K);
-    DeviceMatrix d_B(metal_->device, K, N);
-    DeviceMatrix d_C(metal_->device, M, N);
-
-    // 3. Copy data from HOST to DEVICE
+    DeviceMatrix d_A(ctx_->device.get(), M, K);
+    DeviceMatrix d_B(ctx_->device.get(), K, N);
+    DeviceMatrix d_C(ctx_->device.get(), M, N);
     copy(A, d_A);
     copy(B, d_B);
 
-    /* ------ Run ------ */
-    // 1. Get the kernel-specific configuration
-    const auto& config = kernel->config();
+    std::unique_ptr<MPSGemm> mps;
+    MTL::Size block = MTL::Size::Make(1, 1, 1);
+    MTL::Size grid = MTL::Size::Make(1, 1, 1);
+    if (kernel) {
+      const auto& config = kernel->config();
+      block = MTL::Size::Make(config.block_width, config.block_height, 1);
+      grid = MTL::Size::Make(
+          (N + config.tile_width * config.block_width - 1)
+              / (config.tile_width * config.block_width),
+          (M + config.tile_height * config.block_height - 1)
+              / (config.tile_height * config.block_height),
+          1);
+    } else {
+      mps = std::make_unique<MPSGemm>(ctx_->device.get(), d_A, d_B, d_C);
+    }
 
-    // 2. Set the block size (threadgroup size) from the config
-    MTL::Size block =
-        MTL::Size::Make(config.block_width, config.block_height, 1);
+    // Both paths use the same preallocated, packed row-major FP32 buffers.
+    start_kernel(d_A, d_B, d_C, kernel.get(), mps.get(), grid, block);
 
-    // 3. Calculate the grid size BASED ON TILE DIMENSIONS
-    const size_t grid_x = (N + (config.tile_width * config.block_width) - 1)
-        / (config.tile_width * config.block_width);
-    const size_t grid_y = (M + (config.tile_height * config.block_height) - 1)
-        / (config.tile_height * config.block_height);
-    MTL::Size grid = MTL::Size::Make(grid_x, grid_y, 1);
-
-    // 4. Warm up
-    start_kernel(d_A, d_B, d_C, kernel, grid, block, false);
-
-    // 5. Check correctness
-    if (M <= 1024 && N <= 1024 && K <= 1024) {  // Example condition
-      HostMatrix C(M, N);
-      copy(d_C, C);
-
-      HostMatrix D(M, N);
-      matmul_cpu(A, B, D);
-      if (!equals(C, D)) {
-        throw std::runtime_error("FAILED correctness check for shape ("
-                                 + std::to_string(M) + "," + std::to_string(N)
-                                 + "," + std::to_string(K) + ")");
+    double max_abs_error = std::numeric_limits<double>::quiet_NaN();
+    if (smoke || (M <= 1024 && N <= 1024 && K <= 1024)) {
+      HostMatrix actual(M, N);
+      HostMatrix expected(M, N);
+      copy(d_C, actual);
+      matmul_cpu(A, B, expected);
+      const auto comparison = compare(actual, expected);
+      max_abs_error = comparison.max_abs_error;
+      if (comparison.mismatches != 0) {
+        throw std::runtime_error(
+            "Incorrect " + kernel_name + " result for (" + std::to_string(M)
+            + "," + std::to_string(N) + "," + std::to_string(K)
+            + "): mismatches=" + std::to_string(comparison.mismatches)
+            + ", max_abs_error=" + std::to_string(max_abs_error));
       }
     }
 
-    // 6. Timed benchmark runs
-    double time_ms = run_multiples(d_A, d_B, d_C, kernel, grid, block);
-    double gflops = matmul_time_to_gflops(M, N, K, time_ms);
-
-    std::cout << "Time: " << time_ms << " ms, GFLOPS: " << gflops << "\n";
-    kernel->writer() << M << N << K << time_ms << gflops << endrow;
+    const double time_ms = run_multiples(
+        d_A, d_B, d_C, kernel.get(), mps.get(), grid, block);
+    const double gflops = matmul_time_to_gflops(M, N, K, time_ms);
+    std::cout << "(" << M << ", " << N << ", " << K << "): " << time_ms
+              << " ms, " << gflops << " GFLOP/s, max abs error "
+              << max_abs_error << "\n";
+    writer << M << N << K << time_ms << gflops << max_abs_error << endrow;
   }
 }
 
-void BenchmarkMgr::start_kernel(const DeviceMatrix& A,
-                                const DeviceMatrix& B,
-                                DeviceMatrix& C,
-                                Kernel* kernel,
-                                MTL::Size grid_size,
-                                MTL::Size block_size,
-                                bool timer)
+double BenchmarkMgr::start_kernel(const DeviceMatrix& A,
+                                  const DeviceMatrix& B,
+                                  DeviceMatrix& C,
+                                  Kernel* kernel,
+                                  MPSGemm* mps,
+                                  MTL::Size grid_size,
+                                  MTL::Size block_size)
 {
-  assert(A.cols == B.rows);
-  assert(C.cols == B.cols);
-  assert(C.rows == A.rows);
-
-  uint M = C.rows;
-  uint N = C.cols;
-  uint K = A.cols;
-
-  float alpha = 1.f;
-  float beta = 1.f;
-
-  MatmulParams params{M,
-                      N,
-                      K,
-                      alpha,
-                      beta,
-                      static_cast<uint32_t>(block_size.width),
-                      static_cast<uint32_t>(block_size.height)};
-
-  NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
-
-  MTL::CommandBuffer* cmd_buffer = metal_->cmd_queue->commandBuffer();
-  if (cmd_buffer == nullptr) {
-    throw std::runtime_error(
-        "Cannot run kernel because command buffer is null");
+  if ((kernel == nullptr) == (mps == nullptr)) {
+    throw std::invalid_argument("Select exactly one GEMM implementation");
   }
 
-  MTL::ComputePassDescriptor* descriptor = nullptr;
-  if (timer) {
-    // https://developer.apple.com/videos/play/tech-talks/10001/
-    descriptor = MTL::ComputePassDescriptor::computePassDescriptor();
-    auto sample_buffer_desc =
-        static_cast<MTL::ComputePassSampleBufferAttachmentDescriptor*>(
-            descriptor->sampleBufferAttachments()->object(0));
-    sample_buffer_desc->setSampleBuffer(metal_->counter_buffer);
-    sample_buffer_desc->setStartOfEncoderSampleIndex(0);
-    sample_buffer_desc->setEndOfEncoderSampleIndex(1);
+  auto pool = NS::TransferPtr(NS::AutoreleasePool::alloc()->init());
+  auto command_buffer = NS::RetainPtr(ctx_->cmd_queue->commandBuffer());
+  if (!command_buffer) {
+    throw std::runtime_error("Cannot create Metal command buffer");
   }
 
-  MTL::ComputeCommandEncoder* compute_encoder =
-      cmd_buffer->computeCommandEncoder(descriptor);
-  if (compute_encoder == nullptr) {
-    throw std::runtime_error(
-        "Cannot run kernel because compute encoder is null");
+  if (mps) {
+    mps->encode(command_buffer.get());
+  } else {
+    MatmulParams params{static_cast<uint32_t>(C.rows),
+                        static_cast<uint32_t>(C.cols),
+                        static_cast<uint32_t>(A.cols),
+                        1.f,
+                        0.f,
+                        static_cast<uint32_t>(block_size.width),
+                        static_cast<uint32_t>(block_size.height)};
+    auto encoder = NS::RetainPtr(command_buffer->computeCommandEncoder());
+    if (!encoder) {
+      throw std::runtime_error("Cannot create Metal compute encoder");
+    }
+    encoder->setComputePipelineState(kernel->pipeline());
+    encoder->setBuffer(A.data(), 0, 0);
+    encoder->setBuffer(B.data(), 0, 1);
+    encoder->setBuffer(C.data(), 0, 2);
+    encoder->setBytes(&params, sizeof(params), 3);
+    encoder->dispatchThreadgroups(grid_size, block_size);
+    encoder->endEncoding();
   }
-  compute_encoder->setComputePipelineState(kernel->pipeline());
 
-  // create compute pipeline
-  // move buffer to GPU
-  compute_encoder->setBuffer(A.data(), 0, 0);
-  compute_encoder->setBuffer(B.data(), 0, 1);
-  compute_encoder->setBuffer(C.data(), 0, 2);
+  command_buffer->commit();
+  command_buffer->waitUntilCompleted();
+  if (command_buffer->status() != MTL::CommandBufferStatusCompleted) {
+    const auto* error = command_buffer->error();
+    const std::string message = error
+        ? error->localizedDescription()->utf8String()
+        : "unknown Metal error";
+    throw std::runtime_error("Metal GEMM failed: " + message);
+  }
 
-  // move matrix params to GPU
-  compute_encoder->setBytes(&params, sizeof(MatmulParams), 3);
-
-  // create threads
-  compute_encoder->dispatchThreadgroups(grid_size, block_size);
-  compute_encoder->endEncoding();
-
-  cmd_buffer->commit();
-  cmd_buffer->waitUntilCompleted();
-
-  pool->release();
-}
-
-double BenchmarkMgr::get_run_time() const
-{
-  auto counter_data =
-      metal_->counter_buffer->resolveCounterRange(NS::Range::Make(0, 2));
-  auto timestamps =
-      static_cast<MTL::CounterResultTimestamp*>(counter_data->mutableBytes());
-  uint64_t startTimeGPU = timestamps[0].timestamp;
-  uint64_t endTimeGPU = timestamps[1].timestamp;
-  double ms = static_cast<double>(endTimeGPU - startTimeGPU) / 1e6;
-  return ms;
+  const double elapsed_ms =
+      (command_buffer->GPUEndTime() - command_buffer->GPUStartTime()) * 1000.0;
+  if (elapsed_ms <= 0.0) {
+    throw std::runtime_error("GPU command-buffer timestamps unavailable");
+  }
+  return elapsed_ms;
 }
 
 double BenchmarkMgr::run_multiples(const DeviceMatrix& A,
                                    const DeviceMatrix& B,
                                    DeviceMatrix& C,
                                    Kernel* kernel,
+                                   MPSGemm* mps,
                                    MTL::Size grid_size,
                                    MTL::Size block_size)
 {
-  double total_time = 0;
-  for (int time = 0; time < BENCHMARK_TIME; ++time) {
-    start_kernel(A, B, C, kernel, grid_size, block_size, true);
-    total_time += get_run_time();
+  double total_ms = 0.0;
+  for (int i = 0; i < BENCHMARK_TIME; ++i) {
+    total_ms += start_kernel(A, B, C, kernel, mps, grid_size, block_size);
   }
-  return total_time / static_cast<double>(BENCHMARK_TIME);
+  return total_ms / BENCHMARK_TIME;
 }

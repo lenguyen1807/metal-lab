@@ -33,6 +33,7 @@
 
 build
 /data
+outputs/*.csv
 
 # for python
 # Byte-compiled / optimized / DLL files

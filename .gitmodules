@@ -1,0 +1,3 @@
+[submodule "metal/metal-cpp"]
+	path = metal/metal-cpp
+	url = https://github.com/apple/metal-cpp.git

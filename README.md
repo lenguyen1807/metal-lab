@@ -1,73 +1,76 @@
-# A journey to ~2.88 TFLOPs on my M2 MacBook
+# Metal GEMM lab
 
-This is a diary of my quest to write a face-meltingly fast matrix multiplication (GEMM) kernel on my Apple M2 laptop. Since I don't have an NVIDIA card lying around, I'm using Apple's **Metal** API instead of CUDA. The core ideas are the same: making GEMM as fast as possible. 
+A small C++20 and Metal lab for learning GEMM on Apple GPUs. The current
+experiment compares a handwritten FP32 kernel with Apple's
+`MPSMatrixMultiplication` on the same row-major buffers. MLX is not required.
 
-The theoretical FP32 peak of a 10-core M2 is ~3.6 TFLOPs. Mine's an 8-core, so is **~2.88 TFLOPs**. Can we even get close? Let's find out.
+## Build
 
-This repo is for anyone who wants to learn GPU optimization but is tired of vendor-locked CUDA tutorials. The code is (a little bit) clean, heavily commented (where it matters), and built with modern C++ so we don't leak memory all over the place (and shoot our foot).
+Use macOS, Xcode with the Metal toolchain, and CMake 3.20 or newer. The project
+uses AppleClang and Apple's official [metal-cpp](https://github.com/apple/metal-cpp)
+as a pinned Git submodule. The current pin is
+`27c4382b7151d55a51692cdcb27aaa98752240de`, which includes `MTL4` headers.
 
-## How fast are we so far?
-
-| Kernel          | Best Performance (GFLOPS) | Notes                                           |
-|-----------------|---------------------------|-------------------------------------------------|
-| `naive`         | ~160                      | It's a start! One thread, one MAC. So pure.     |
-
-## Get it running
-
-You'll need a Mac with an M-series chip. Sorry, no Windows or Linux love here, this is a Metal party.
-
-**1. Install the tools of the trade.**
-
-If you don't have Homebrew, get it. Then:
-```bash
-brew install cmake make llvm@20
+```sh
+git submodule update --init --recursive
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
 ```
-We need `llvm`'s clang because Apple's default one can be a bit... quirky. Note that `llvm` newest version (21) cannot work on MacOS properly so we choose version 20.
 
-**2. Build the thing.**
+`metal/definition.cpp` is the single translation unit that defines metal-cpp's
+implementation symbols. The C++ host path currently uses Metal's original
+command queue API; the newer headers make the Metal 4 API available for later
+experiments.
 
-Pop open a terminal and run these:
-```bash
-# Make a home for the benchmark results
-mkdir -p outputs
+## Check correctness
 
-# Let CMake do its magic. This points to the new clang we just installed.
-cmake -S . -B build -G "Unix Makefiles" \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_C_COMPILER=$(brew --prefix llvm)/bin/clang \
-      -DCMAKE_CXX_COMPILER=$(brew --prefix llvm)/bin/clang++
-
-# Fire the lasers!
-cmake --build build
+```sh
+./build/bin/gemm mps --smoke
+./build/bin/gemm naive --smoke
+ctest --test-dir build --output-on-failure
 ```
-If that all worked, you'll have a shiny new executable at `build/bin/gemm`.
 
-## Run the benchmark!
+The smoke suite includes tiny, square, and irregular shapes through
+`(M,N,K) = (257,263,255)`. It checks results against a CPU reference that
+accumulates in double precision. The check uses
+`abs(actual - expected) <= 1e-3 + 1e-3 * abs(expected)`.
 
-Time for the moment of truth. Pit your kernel against a whole gauntlet of matrix shapes designed to stress it out.
+## Benchmark
 
-```bash
-# It's easy, just tell it which kernel to run
+```sh
+./build/bin/gemm mps
 ./build/bin/gemm naive
 ```
 
-The program will spit out performance numbers to your console and also save a detailed `.csv` file in the `outputs` folder. This is the good stuff you can use to make pretty graphs in Python.
+The default suite includes large shapes; the naive kernel can take a long time.
+Each run writes `outputs/<kernel>.csv`. Smoke runs write
+`outputs/<kernel>_smoke.csv`. New generated CSVs are ignored by Git.
 
-**Available kernels:**
-- `naive`: The humble beginning. 
+Both implementations compute row-major, non-transposed FP32
+`C = A @ B` (`alpha=1`, `beta=0`) from identical preallocated
+`MTLStorageModeShared` buffers. The MPS adapter in `gemm/mps_gemm.mm` bridges
+the existing metal-cpp objects to Objective-C MPS objects. It uses packed
+`columns * sizeof(float)` row strides so the input layout matches the custom
+kernel. MPS can recommend a different row stride for best performance; that is
+a separate experiment, not part of this comparison.
 
-## The Grand Plan (aka The Optimization Checklist)
+The reported time is `GPUEndTime - GPUStartTime` for one completed command
+buffer after one warm-up. It includes all GPU work MPS encodes into that buffer.
+It excludes input generation, buffer allocation, encoding, submission, and the
+CPU wait. The harness reports the mean of 20 runs. Tiny smoke timings are useful
+for correctness checks, not performance claims. The default suite checks CPU
+correctness for shapes whose three dimensions are at most 1024; unvalidated
+rows have `nan` in the error column.
 
-This project is structured so you can follow the optimization journey step-by-step. Each new kernel will be a separate file, building on the lessons of the last.
+## Object ownership
 
-- [x] **Chapter 0: The Setup.** Build a solid, memory-safe C++ framework with a real benchmark harness. No segfaults allowed.
-- [ ] **Chapter 1: The Tiling.** The first real optimization. Use that sweet, sweet threadgroup memory (`__threadgroup` in Metal, `__shared__` in CUDA) to stop hitting DRAM so much. This is where we should see the first big performance jump.
-<!-- -   [ ] **Chapter 2: More Work, Less Laziness.** Make each thread compute more than one output element. This hides instruction latency and is great for register reuse.
--   [ ] **Chapter 3: SIMD-ify Everything.** Use Metal's vector types (`float4`, `half4`) to get more math done per clock cycle.
--   [ ] **Chapter 4: The Final Boss.** Memory coalescing, bank conflicts, and other arcane horrors. -->
+Retained metal-cpp objects use `NS::SharedPtr<T>` and `NS::TransferPtr(...)`:
+the latter takes ownership of the +1 reference returned by `new`, `alloc/init`,
+or `CreateSystemDefaultDevice`. `NS::RetainPtr(...)` is used when retaining an
+autoreleased object, such as a command buffer, beyond a borrowed raw pointer.
+Autorelease pools bound temporary Objective-C object lifetimes. The Objective-C++
+MPS adapter uses ARC for its MPS objects. Raw pointers passed to encoders and
+MPS are borrowed for the duration of the call; the owning C++ objects outlive
+the completed command buffer.
 
-## Resources
-
-- [Leimao's CUDA GEMM Optimization](https://leimao.github.io/article/CUDA-Matrix-Multiplication-Optimization/)
-- [siboehm's CUDA MMM](https://siboehm.com/articles/22/CUDA-MMM)
-- [Metal Shading Language Specification](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)
+This ownership pattern follows [Apple's metal-cpp guidance](https://developer.apple.com/metal/cpp/).

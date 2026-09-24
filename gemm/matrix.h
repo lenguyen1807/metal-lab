@@ -1,25 +1,16 @@
 #pragma once
 
-#include "Metal/MTLResource.hpp"
-#pragma once
-
 #include <cstddef>
 #include <iostream>
-#include <memory>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
+#include "Foundation/NSSharedPtr.hpp"
 #include "Metal/MTLBuffer.hpp"
 #include "Metal/MTLDevice.hpp"
 
 /** Matrix Class on GPU */
-struct MetalBufferDeleter
-{
-  void operator()(MTL::Buffer* buf) const { buf->release(); }
-};
-
-using BufferPtr = std::unique_ptr<MTL::Buffer, MetalBufferDeleter>;
-
 class DeviceMatrix
 {
 public:
@@ -35,15 +26,18 @@ public:
       throw std::runtime_error("Cannot create matrix with empty device");
     }
 
-    data_ = BufferPtr(device->newBuffer(cols * rows * sizeof(float),
-                                        MTL::ResourceStorageModeShared));
+    data_ = NS::TransferPtr(device->newBuffer(
+        cols * rows * sizeof(float), MTL::ResourceStorageModeShared));
+    if (!data_) {
+      throw std::runtime_error("Cannot allocate Metal matrix buffer");
+    }
   }
 
   const MTL::Buffer* data() const { return data_.get(); }
   MTL::Buffer* data() { return data_.get(); }
 
 private:
-  BufferPtr data_;
+  NS::SharedPtr<MTL::Buffer> data_;
 };
 
 /** Matrix Class on CPU */
@@ -88,8 +82,7 @@ public:
   // create a random matrix
   static HostMatrix random(float mu, float std, size_t rows, size_t cols)
   {
-    static std::random_device rand_dev;
-    static std::mt19937 generator(rand_dev());
+    static std::mt19937 generator(0xC0FFEE);
     std::normal_distribution<float> distr(mu, std);
 
     // create matrix

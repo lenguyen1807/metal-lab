@@ -1,13 +1,14 @@
 #pragma once
 
+#include <memory>
 #include <string>
-#include <unordered_map>
 
-#include "gemm/kernel.h"
-#include "gemm/matrix.h"
-#include "gemm/metal_mgr.h"
+#include "Metal/MTLTypes.hpp"
 
-static const std::string OPT_NAME[] = {"naive"};
+class DeviceMatrix;
+class Kernel;
+class MPSGemm;
+struct MetalContext;
 
 class BenchmarkMgr
 {
@@ -15,27 +16,24 @@ public:
   BenchmarkMgr();
   ~BenchmarkMgr();
 
-  void run_benchmark_suite(const std::string& kernel_name);
+  void run_benchmark_suite(const std::string& kernel_name, bool smoke = false);
 
 private:
-  void start_kernel(const DeviceMatrix& A,
-                    const DeviceMatrix& B,
-                    DeviceMatrix& C,
-                    Kernel* kernel,
-                    MTL::Size grid_size,
-                    MTL::Size block_size,
-                    bool timer = false);
+  double start_kernel(const DeviceMatrix& A,
+                      const DeviceMatrix& B,
+                      DeviceMatrix& C,
+                      Kernel* kernel,
+                      MPSGemm* mps,
+                      MTL::Size grid_size,
+                      MTL::Size block_size);
 
   double run_multiples(const DeviceMatrix& A,
                        const DeviceMatrix& B,
                        DeviceMatrix& C,
                        Kernel* kernel,
+                       MPSGemm* mps,
                        MTL::Size grid_size,
                        MTL::Size block_size);
 
-  double get_run_time() const;
-
-private:
-  std::unique_ptr<MetalMgr> metal_;
-  std::unordered_map<std::string, std::unique_ptr<Kernel>> kernels_;
+  std::unique_ptr<MetalContext> ctx_;
 };

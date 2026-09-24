@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Foundation/NSAutoreleasePool.hpp"
+#include "Foundation/NSSharedPtr.hpp"
 #include "Metal/MTLComputePipeline.hpp"
 #include "Metal/MTLDevice.hpp"
 #include "Metal/MTLLibrary.hpp"
@@ -21,11 +23,11 @@ class Kernel
 {
 public:
   Kernel(const std::string& kernel_name, MTL::Device* device)
-      : device_(device)
   {
-    if (device_ == nullptr) {
+    if (device == nullptr) {
       throw std::runtime_error("Device for kernel cannot be empty");
     }
+    auto pool = NS::TransferPtr(NS::AutoreleasePool::alloc()->init());
 
     // setup kernel configuration
     if (kernel_name == "naive") {
@@ -38,7 +40,7 @@ public:
                                + kernel_name);
     }
 
-    NS::Error* error;
+    NS::Error* error = nullptr;
 
     // read kernel source
     std::string path = std::string(KERNEL_PATH) + kernel_name + ".metal";
@@ -47,51 +49,45 @@ public:
         NS::String::string(src.c_str(), NS::StringEncoding::UTF8StringEncoding);
 
     // compile library
-    library_ = device->newLibrary(metal_src, nullptr, &error);
+    library_ = NS::TransferPtr(device->newLibrary(metal_src, nullptr, &error));
 
     // check errors
-    if (error != nullptr) {
-      const char* msg = error->localizedDescription()->utf8String();
-      throw std::runtime_error("Cannot create library because: "
-                               + std::string(msg));
+    if (error != nullptr || !library_) {
+      const char* msg = error
+          ? error->localizedDescription()->utf8String()
+          : "Metal returned no library";
+      throw std::runtime_error("Cannot create library because: " + std::string(msg));
     }
 
     // create function
     auto str = NS::String::string(("matmul_" + kernel_name).c_str(),
                                   NS::ASCIIStringEncoding);
-    func_ = library_->newFunction(str);
+    func_ = NS::TransferPtr(library_->newFunction(str));
+    if (!func_) {
+      throw std::runtime_error("Cannot find Metal function matmul_" + kernel_name);
+    }
 
     // create pipeline for function
-    pipeline_ = device->newComputePipelineState(func_, &error);
+    pipeline_ = NS::TransferPtr(device->newComputePipelineState(func_.get(), &error));
 
-    if (error != nullptr) {
-      const char* msg = error->localizedDescription()->utf8String();
+    if (error != nullptr || !pipeline_) {
+      const char* msg = error
+          ? error->localizedDescription()->utf8String()
+          : "Metal returned no pipeline";
       throw std::runtime_error("Cannot create library pipeline, error: "
                                + std::string(msg));
     }
 
-    // create writer after everything
-    writer_ = std::make_unique<CSVWriter>(kernel_name + ".csv");
   }
 
-  ~Kernel()
-  {
-    func_->release();
-    pipeline_->release();
-    library_->release();
-  }
-
-  MTL::Library* library() const { return library_; }
-  MTL::Function* function() const { return func_; }
-  MTL::ComputePipelineState* pipeline() const { return pipeline_; }
-  CSVWriter& writer() const { return *writer_; }
+  MTL::Library* library() const { return library_.get(); }
+  MTL::Function* function() const { return func_.get(); }
+  MTL::ComputePipelineState* pipeline() const { return pipeline_.get(); }
   const KernelConfig& config() const { return config_; }
 
 private:
-  MTL::Library* library_;
-  MTL::Function* func_;
-  MTL::ComputePipelineState* pipeline_;
-  MTL::Device* device_;
-  std::unique_ptr<CSVWriter> writer_;
+  NS::SharedPtr<MTL::Library> library_;
+  NS::SharedPtr<MTL::Function> func_;
+  NS::SharedPtr<MTL::ComputePipelineState> pipeline_;
   KernelConfig config_;
 };
