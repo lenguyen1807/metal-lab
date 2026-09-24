@@ -11,7 +11,7 @@ namespace {
 void usage()
 {
   std::cerr << "Usage:\n"
-            << "  gemm bench [--smoke] [--kernel NAME] [--iterations N]\n"
+            << "  gemm bench [--smoke] [--kernel GROUP] [--function NAME] [--iterations N] [--output FILE.csv]\n"
             << "  gemm list\n";
 }
 
@@ -29,7 +29,7 @@ int main(int argc, char* argv[])
     std::cout << "mps (baseline)\n";
     std::cout << "mlx (baseline)\n";
     for (const auto& spec : kernel_specs()) {
-      std::cout << spec.name << '\n';
+      std::cout << spec.function << " (group: " << spec.name << ")\n";
     }
     return 0;
   }
@@ -46,6 +46,13 @@ int main(int argc, char* argv[])
         options.smoke = true;
       } else if (arg == "--kernel" && i + 1 < argc) {
         options.kernels.emplace_back(argv[++i]);
+      } else if (arg == "--function" && i + 1 < argc) {
+        options.functions.emplace_back(argv[++i]);
+      } else if (arg == "--output" && i + 1 < argc) {
+        options.output = argv[++i];
+        if (options.output.empty()) {
+          throw std::invalid_argument("Output must be a CSV filename without a path");
+        }
       } else if (arg == "--iterations" && i + 1 < argc) {
         size_t consumed = 0;
         const std::string value = argv[++i];

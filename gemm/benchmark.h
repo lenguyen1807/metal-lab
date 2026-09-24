@@ -15,6 +15,8 @@ struct BenchmarkOptions
   bool smoke = false;
   size_t iterations = 10;
   std::vector<std::string> kernels;
+  std::vector<std::string> functions;
+  std::string output;
 };
 
 class BenchmarkMgr

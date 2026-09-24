@@ -2,22 +2,18 @@
 
 using namespace metal;
 
-struct MatmulParams
+struct GemmShape
 {
   uint M;
   uint N;
   uint K;
-  float alpha;
-  float beta;
-  uint BLOCK_SIZE_X;
-  uint BLOCK_SIZE_Y;
 };
 
 template <uint BLOCK_N, uint BLOCK_K, uint BLOCK_M>
 kernel void matmul_tiling(device const float* A [[buffer(0)]],
                         device const float* B  [[buffer(1)]],
                         device float* C        [[buffer(2)]],
-                        device const MatmulParams& params [[buffer(3)]],
+                        device const GemmShape& params [[buffer(3)]],
                         uint2 block_pos [[ threadgroup_position_in_grid ]],
                         uint2 thread_pos [[ thread_position_in_threadgroup ]])
 {
@@ -87,7 +83,7 @@ template [[ host_name("matmul_tiling_mnk16") ]]
 kernel void matmul_tiling<16, 16, 16>(device const float* A [[buffer(0)]],
                         device const float* B  [[buffer(1)]],
                         device float* C        [[buffer(2)]],
-                        device const MatmulParams& params [[buffer(3)]],
+                        device const GemmShape& params [[buffer(3)]],
                         uint2 block_pos [[ threadgroup_position_in_grid ]],
                         uint2 thread_pos [[ thread_position_in_threadgroup ]]);
 
@@ -95,7 +91,7 @@ template [[ host_name("matmul_tiling_mnk32") ]]
 kernel void matmul_tiling<32, 32, 32>(device const float* A [[buffer(0)]],
                         device const float* B  [[buffer(1)]],
                         device float* C        [[buffer(2)]],
-                        device const MatmulParams& params [[buffer(3)]],
+                        device const GemmShape& params [[buffer(3)]],
                         uint2 block_pos [[ threadgroup_position_in_grid ]],
                         uint2 thread_pos [[ thread_position_in_threadgroup ]]);
 
@@ -103,6 +99,6 @@ template [[ host_name("matmul_tiling_mn32k16") ]]
 kernel void matmul_tiling<32, 16, 32>(device const float* A [[buffer(0)]],
                         device const float* B  [[buffer(1)]],
                         device float* C        [[buffer(2)]],
-                        device const MatmulParams& params [[buffer(3)]],
+                        device const GemmShape& params [[buffer(3)]],
                         uint2 block_pos [[ threadgroup_position_in_grid ]],
                         uint2 thread_pos [[ thread_position_in_threadgroup ]]);

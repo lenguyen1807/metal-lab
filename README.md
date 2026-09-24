@@ -35,12 +35,19 @@ cmake --build build -j
 ./build/bin/gemm bench --smoke --iterations 3
 ./build/bin/gemm bench
 ./build/bin/gemm bench --kernel naive --iterations 5
+./build/bin/gemm bench --kernel tensorops_sync --iterations 5
+./build/bin/gemm bench --function tensorops_sync_k256 --iterations 10 \
+  --output sync_k256_run1.csv
 ```
 
 `bench` runs every registered custom kernel alongside both baselines.
-`--kernel NAME` selects custom kernels; it never removes MPS or MLX.
-`--smoke` uses six small and irregular shapes. The default suite contains
-square shapes from 512³ through 4096³ and three 4096×4096 cases with small K;
+`--kernel GROUP` selects an experiment family; `--function NAME` selects an
+exact variant. Both options can be repeated and always retain MPS and MLX.
+`list` shows function names and their groups.
+`--output FILE.csv` saves a run under `outputs/` without replacing the default
+CSV or another experiment's results.
+`--smoke` uses seven small shapes, including an aligned 256³ case that runs the
+synchronized TensorOps kernel. The default suite currently measures 4096³;
 edit [`gemm/params.h`](gemm/params.h) to change it. Timing uses 10 samples
 per shape and implementation unless `--iterations` is given.
 
@@ -76,6 +83,16 @@ dispatch plan, and encoder in [`gemm/kernel.cpp`](gemm/kernel.cpp).
 The harness lets each kernel choose its own grid and bindings. Run
 `./build/bin/gemm bench --kernel <name> --smoke` before the full suite.
 
-The current custom path supports packed NN matrices. General row strides and
-transposed layouts can be added as separate experiments. Metal objects on the
-C++ side use `NS::SharedPtr`; the MPS bridge uses Objective-C++ ARC.
+`simdgroup` contains 8×8 direct, 32×32 register-tiled, and 32×32 threadgroup
+memory variants. These require aligned dimensions. `tensorops` contains Metal 4
+FP32 variants for tile size, SIMD group count, and Morton dispatch; it handles
+irregular positive shapes. `tensorops_sync` contains explicit K-chunk and
+Morton experiments for aligned shapes. Its `tensorops_sync_k256` variant uses
+64×64 output tiles, accumulates 256-wide K chunks in a cooperative tensor, and
+synchronizes four SIMD groups between chunks. Its M and N must be divisible by
+64 and K by 256. Unsupported shapes appear as `unsupported` in the benchmark.
+See [`EXPERIMENTS.md`](EXPERIMENTS.md) for measured results and MLX source notes.
+
+These kernels use packed NN matrices. General row strides and transposed
+layouts can be added as separate experiments. Metal objects on the C++ side
+use `NS::SharedPtr`; the MPS bridge uses Objective-C++ ARC.

@@ -24,7 +24,7 @@
 
 const std::vector<GemmShape> smoke_shapes = {
     {1, 1, 1}, {7, 13, 5}, {17, 31, 9},
-    {32, 32, 32}, {65, 37, 33}, {257, 263, 255}};
+    {32, 32, 32}, {65, 37, 33}, {257, 263, 255}, {256, 256, 256}};
 
 std::string device_tag(const char* name)
 {
@@ -111,9 +111,11 @@ void BenchmarkMgr::run(const BenchmarkOptions& options)
 {
   std::vector<std::unique_ptr<Kernel>> native;
   for (const auto& spec : kernel_specs()) {
-    if (options.kernels.empty()
+    if ((options.kernels.empty() && options.functions.empty())
         || std::find(options.kernels.begin(), options.kernels.end(), spec.name)
-            != options.kernels.end()) {
+            != options.kernels.end()
+        || std::find(options.functions.begin(), options.functions.end(), spec.function)
+            != options.functions.end()) {
       native.push_back(std::make_unique<Kernel>(spec, ctx_->device.get()));
     }
   }
@@ -124,14 +126,29 @@ void BenchmarkMgr::run(const BenchmarkOptions& options)
       throw std::invalid_argument("Unknown custom kernel: " + requested);
     }
   }
+  for (const auto& requested : options.functions) {
+    if (std::none_of(native.begin(), native.end(), [&](const auto& kernel) {
+          return requested == kernel->function();
+        })) {
+      throw std::invalid_argument("Unknown custom function: " + requested);
+    }
+  }
 
   const std::string gpu_name = ctx_->device->name()->utf8String();
   std::cout << "GPU: " << gpu_name
             << " | baselines: MPSMatrixMultiplication, MLX matmul"
             << " | FP32 row-major NN\n";
-  const std::string filename = std::string("bench_")
-      + (options.smoke ? "smoke_" : "")
-      + device_tag(gpu_name.c_str()) + ".csv";
+  const std::string filename = options.output.empty()
+      ? std::string("bench_") + (options.smoke ? "smoke_" : "")
+          + device_tag(gpu_name.c_str()) + ".csv"
+      : options.output;
+  if (filename.size() < 5 || !filename.ends_with(".csv")
+      || filename.front() == '.'
+      || !std::all_of(filename.begin(), filename.end(), [](unsigned char ch) {
+           return std::isalnum(ch) || ch == '_' || ch == '-' || ch == '.';
+         })) {
+    throw std::invalid_argument("Output must be a CSV filename without a path");
+  }
   CSVWriter writer(filename);
   writer << "M" << "N" << "K" << "kernel" << "status"
          << "median_ms" << "gflops" << "vs_mps" << "vs_mlx" << endrow;
