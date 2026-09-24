@@ -21,7 +21,7 @@ kernel void matmul_naive(device const float * A [[buffer(0)]],
     // Block index
     const uint block_x = block_pos.x; // CUDA: blockIdx.x
     const uint block_y = block_pos.y; // CUDA: blockIdx.y
-    
+
     // Thread index
     const uint thread_x = thread_pos.x; // CUDA: threadIdx.x
     const uint thread_y = thread_pos.y; // CUDA: threadIdx.y

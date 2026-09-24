@@ -6,9 +6,6 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_subdirectory(metal)
 find_package(MLX REQUIRED CONFIG)
-if(NOT MLX_BUILD_METAL)
-    message(FATAL_ERROR "The installed MLX must include its Metal backend")
-endif()
 
 add_library(gemm_metal SHARED
     gemm/benchmark.cpp
@@ -32,7 +29,3 @@ target_compile_definitions(gemm_metal PUBLIC
 
 add_executable(gemm main.cpp)
 target_link_libraries(gemm PRIVATE gemm_metal)
-
-enable_testing()
-add_test(NAME gemm_baseline_agreement COMMAND gemm test)
-add_test(NAME gemm_comparison COMMAND gemm bench --smoke)

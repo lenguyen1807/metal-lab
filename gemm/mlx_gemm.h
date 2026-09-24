@@ -1,24 +1,22 @@
 #pragma once
 
-#include <memory>
 #include <vector>
+
+#include "mlx/mlx.h"
 
 class HostMatrix;
 
-// Keep MLX types and its lazy evaluation contract inside the adapter.
-class MLXGemm
-{
-public:
-  MLXGemm(const HostMatrix& A, const HostMatrix& B);
-  ~MLXGemm();
+class MLXGemm {
+   public:
+    MLXGemm(const HostMatrix& A, const HostMatrix& B);
 
-  MLXGemm(const MLXGemm&) = delete;
-  MLXGemm& operator=(const MLXGemm&) = delete;
+    void run() const;
+    std::vector<float> output() const;
 
-  void run();
-  std::vector<float> output() const;
+   private:
+    mlx::core::array evaluate() const;
 
-private:
-  struct Impl;
-  std::unique_ptr<Impl> impl_;
+    mlx::core::Stream gpu_;
+    mlx::core::array left_;
+    mlx::core::array right_;
 };

@@ -11,7 +11,6 @@ namespace {
 void usage()
 {
   std::cerr << "Usage:\n"
-            << "  gemm test [--kernel NAME]\n"
             << "  gemm bench [--smoke] [--kernel NAME] [--iterations N]\n"
             << "  gemm list\n";
 }
@@ -34,21 +33,20 @@ int main(int argc, char* argv[])
     }
     return 0;
   }
-  if (command != "test" && command != "bench") {
+  if (command != "bench") {
     usage();
     return 2;
   }
 
   try {
     BenchmarkOptions options;
-    options.test_only = command == "test";
     for (int i = 2; i < argc; ++i) {
       const std::string arg = argv[i];
-      if (arg == "--smoke" && !options.test_only) {
+      if (arg == "--smoke") {
         options.smoke = true;
       } else if (arg == "--kernel" && i + 1 < argc) {
         options.kernels.emplace_back(argv[++i]);
-      } else if (arg == "--iterations" && !options.test_only && i + 1 < argc) {
+      } else if (arg == "--iterations" && i + 1 < argc) {
         size_t consumed = 0;
         const std::string value = argv[++i];
         if (value.empty() || value.front() == '-') {

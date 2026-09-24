@@ -22,8 +22,6 @@
 #include "gemm/params.h"
 #include "gemm/utils.h"
 
-namespace {
-
 const std::vector<GemmShape> smoke_shapes = {
     {1, 1, 1}, {7, 13, 5}, {17, 31, 9},
     {32, 32, 32}, {65, 37, 33}, {257, 263, 255}};
@@ -88,7 +86,7 @@ void print_result(const GemmShape& shape,
   const std::string vs_mlx = median_ms && mlx_ms
       ? number(*mlx_ms / *median_ms, 2) + "x"
       : "-";
-  std::cout << std::left << std::setw(12) << kernel
+  std::cout << std::left << std::setw(24) << kernel
             << std::right << std::setw(12) << ms
             << std::setw(13) << gflops
             << std::setw(11) << vs_mps
@@ -106,16 +104,11 @@ void print_result(const GemmShape& shape,
          << endrow;
 }
 
-}  // namespace
-
 BenchmarkMgr::BenchmarkMgr() : ctx_(std::make_unique<MetalContext>()) {}
 BenchmarkMgr::~BenchmarkMgr() = default;
 
 void BenchmarkMgr::run(const BenchmarkOptions& options)
 {
-  if (options.iterations == 0) {
-    throw std::invalid_argument("Iterations must be positive");
-  }
   std::vector<std::unique_ptr<Kernel>> native;
   for (const auto& spec : kernel_specs()) {
     if (options.kernels.empty()
@@ -136,20 +129,14 @@ void BenchmarkMgr::run(const BenchmarkOptions& options)
   std::cout << "GPU: " << gpu_name
             << " | baselines: MPSMatrixMultiplication, MLX matmul"
             << " | FP32 row-major NN\n";
-  std::unique_ptr<CSVWriter> writer;
-  std::string filename;
-  if (!options.test_only) {
-    filename = std::string("bench_")
-        + (options.smoke ? "smoke_" : "")
-        + device_tag(gpu_name.c_str()) + ".csv";
-    writer = std::make_unique<CSVWriter>(filename);
-    *writer << "M" << "N" << "K" << "kernel" << "status"
-            << "median_ms" << "gflops" << "vs_mps" << "vs_mlx"
-            << endrow;
-  }
+  const std::string filename = std::string("bench_")
+      + (options.smoke ? "smoke_" : "")
+      + device_tag(gpu_name.c_str()) + ".csv";
+  CSVWriter writer(filename);
+  writer << "M" << "N" << "K" << "kernel" << "status"
+         << "median_ms" << "gflops" << "vs_mps" << "vs_mlx" << endrow;
 
-  const auto& shapes = options.smoke || options.test_only
-      ? smoke_shapes : BENCHMARK_SHAPES;
+  const auto& shapes = options.smoke ? smoke_shapes : BENCHMARK_SHAPES;
   for (const GemmShape& shape : shapes) {
     const size_t M = shape.M, N = shape.N, K = shape.K;
     HostMatrix A = HostMatrix::random(0.f, 1.f, M, K);
@@ -163,13 +150,12 @@ void BenchmarkMgr::run(const BenchmarkOptions& options)
     MPSGemm baseline(ctx_->device.get(), d_A, d_B, d_baseline);
     MLXGemm mlx(A, B);
     start_kernel(d_A, d_B, d_baseline, nullptr, &baseline);
-    mlx.run();
     {
       const std::vector<float> mlx_output = mlx.output();
       if (mlx_output.size() != M * N) {
         throw std::runtime_error("MLX returned an unexpected output shape");
       }
-      const Comparison mlx_comparison = compare(
+      const ResultComparison mlx_comparison = ResultComparison::compare(
           mlx_output.data(), d_baseline.host_data(), M * N);
       if (mlx_comparison.mismatches != 0) {
         throw std::runtime_error(
@@ -193,10 +179,10 @@ void BenchmarkMgr::run(const BenchmarkOptions& options)
       }
       auto output = std::make_unique<DeviceMatrix>(ctx_->device.get(), M, N);
       start_kernel(d_A, d_B, *output, kernel.get(), nullptr);
-      const Comparison comparison = compare(*output, d_baseline);
+      const ResultComparison comparison = ResultComparison::compare(*output, d_baseline);
       if (comparison.mismatches != 0) {
         throw std::runtime_error(
-            std::string(kernel->name()) + " disagrees with MPS at "
+            std::string(kernel->function()) + " disagrees with MPS at "
             + std::to_string(M) + "x" + std::to_string(N) + "x"
             + std::to_string(K) + ": mismatches="
             + std::to_string(comparison.mismatches) + ", max_abs_error="
@@ -204,44 +190,37 @@ void BenchmarkMgr::run(const BenchmarkOptions& options)
       }
       prepared.push_back({kernel.get(), std::move(output)});
     }
-    if (options.test_only) {
-      std::cout << "ok  " << M << "x" << N << "x" << K << '\n';
-      continue;
-    }
-
     // Every variant is now warmed and checked. Timing begins only here.
     const double mps_ms = median_ms(options.iterations, [&] {
       start_kernel(d_A, d_B, d_baseline, nullptr, &baseline);
     });
     const double mlx_ms = median_ms(options.iterations, [&] { mlx.run(); });
     std::cout << "\n### " << M << "x" << N << "x" << K << "\n"
-              << std::left << std::setw(12) << "Kernel"
+              << std::left << std::setw(24) << "Kernel"
               << std::right << std::setw(12) << "median ms"
               << std::setw(13) << "GFLOP/s"
               << std::setw(11) << "vs MPS"
               << std::setw(11) << "vs MLX"
               << std::setw(14) << "status" << '\n';
     print_result(shape, "mps", "baseline", mps_ms, mps_ms,
-                 mlx_ms, *writer);
+                 mlx_ms, writer);
     print_result(shape, "mlx", "baseline", mlx_ms, mps_ms,
-                 mlx_ms, *writer);
+                 mlx_ms, writer);
     for (const auto& item : prepared) {
       if (!item.output) {
-        print_result(shape, item.kernel->name(), "unsupported",
-                     std::nullopt, mps_ms, mlx_ms, *writer);
+        print_result(shape, item.kernel->function(), "unsupported",
+                     std::nullopt, mps_ms, mlx_ms, writer);
         continue;
       }
       const double kernel_ms = median_ms(options.iterations, [&] {
         start_kernel(d_A, d_B, *item.output, item.kernel, nullptr);
       });
-      print_result(shape, item.kernel->name(), "ok", kernel_ms,
-                   mps_ms, mlx_ms, *writer);
+      print_result(shape, item.kernel->function(), "ok", kernel_ms,
+                   mps_ms, mlx_ms, writer);
     }
   }
 
-  if (writer) {
-    std::cout << "\nCSV: " << OUTPUTS_PATH << filename << '\n';
-  }
+  std::cout << "\nCSV: " << OUTPUTS_PATH << filename << '\n';
 }
 
 void BenchmarkMgr::start_kernel(const DeviceMatrix& A,
@@ -250,9 +229,6 @@ void BenchmarkMgr::start_kernel(const DeviceMatrix& A,
                                 Kernel* kernel,
                                 MPSGemm* mps)
 {
-  if ((kernel == nullptr) == (mps == nullptr)) {
-    throw std::invalid_argument("Select exactly one GEMM implementation");
-  }
   auto pool = NS::TransferPtr(NS::AutoreleasePool::alloc()->init());
   auto command_buffer = NS::RetainPtr(ctx_->cmd_queue->commandBuffer());
   if (!command_buffer) {

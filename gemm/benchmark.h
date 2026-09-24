@@ -13,7 +13,6 @@ struct MetalContext;
 struct BenchmarkOptions
 {
   bool smoke = false;
-  bool test_only = false;
   size_t iterations = 10;
   std::vector<std::string> kernels;
 };
