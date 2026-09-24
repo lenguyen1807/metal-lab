@@ -28,6 +28,7 @@ int main(int argc, char* argv[])
   const std::string command = argv[1];
   if (command == "list" && argc == 2) {
     std::cout << "mps (baseline)\n";
+    std::cout << "mlx (baseline)\n";
     for (const auto& spec : kernel_specs()) {
       std::cout << spec.name << '\n';
     }

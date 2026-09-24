@@ -151,16 +151,11 @@ struct Comparison
   double max_abs_error = 0.0;
 };
 
-inline Comparison compare(const DeviceMatrix& actual,
-                          const DeviceMatrix& expected)
+inline Comparison compare(const float* actual_data,
+                          const float* expected_data,
+                          size_t count)
 {
-  assert(actual.cols == expected.cols);
-  assert(actual.rows == expected.rows);
-
   Comparison result;
-  const size_t count = actual.rows * actual.cols;
-  const float* actual_data = actual.host_data();
-  const float* expected_data = expected.host_data();
   for (size_t i = 0; i < count; ++i) {
     if (!std::isfinite(actual_data[i]) || !std::isfinite(expected_data[i])) {
       result.max_abs_error = std::numeric_limits<double>::infinity();
@@ -176,6 +171,15 @@ inline Comparison compare(const DeviceMatrix& actual,
     }
   }
   return result;
+}
+
+inline Comparison compare(const DeviceMatrix& actual,
+                          const DeviceMatrix& expected)
+{
+  assert(actual.cols == expected.cols);
+  assert(actual.rows == expected.rows);
+  return compare(actual.host_data(), expected.host_data(),
+                 actual.rows * actual.cols);
 }
 
 inline void copy(const HostMatrix& src, DeviceMatrix& dst)

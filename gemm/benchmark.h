@@ -27,18 +27,11 @@ public:
   void run(const BenchmarkOptions& options);
 
 private:
-  double start_kernel(const DeviceMatrix& A,
-                      const DeviceMatrix& B,
-                      DeviceMatrix& C,
-                      Kernel* kernel,
-                      MPSGemm* mps);
-
-  double run_multiples(const DeviceMatrix& A,
-                       const DeviceMatrix& B,
-                       DeviceMatrix& C,
-                       Kernel* kernel,
-                       MPSGemm* mps,
-                       size_t iterations);
+  void start_kernel(const DeviceMatrix& A,
+                    const DeviceMatrix& B,
+                    DeviceMatrix& C,
+                    Kernel* kernel,
+                    MPSGemm* mps);
 
   std::unique_ptr<MetalContext> ctx_;
 };

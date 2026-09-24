@@ -5,16 +5,22 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_subdirectory(metal)
+find_package(MLX REQUIRED CONFIG)
+if(NOT MLX_BUILD_METAL)
+    message(FATAL_ERROR "The installed MLX must include its Metal backend")
+endif()
 
 add_library(gemm_metal SHARED
     gemm/benchmark.cpp
     gemm/kernel.cpp
     gemm/metal_mgr.cpp
+    gemm/mlx_gemm.cpp
     gemm/mps_gemm.mm
 )
 target_compile_features(gemm_metal PUBLIC cxx_std_20)
 target_include_directories(gemm_metal PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(gemm_metal PUBLIC METAL_CPP "-framework MetalPerformanceShaders")
+target_link_libraries(gemm_metal PUBLIC METAL_CPP "-framework MetalPerformanceShaders"
+    PRIVATE mlx)
 target_compile_options(gemm_metal PRIVATE
     -Wall -Wextra -Wpedantic
     $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
@@ -28,5 +34,5 @@ add_executable(gemm main.cpp)
 target_link_libraries(gemm PRIVATE gemm_metal)
 
 enable_testing()
-add_test(NAME gemm_mps_agreement COMMAND gemm test)
+add_test(NAME gemm_baseline_agreement COMMAND gemm test)
 add_test(NAME gemm_comparison COMMAND gemm bench --smoke)
