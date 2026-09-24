@@ -35,6 +35,10 @@ public:
 
   const MTL::Buffer* data() const { return data_.get(); }
   MTL::Buffer* data() { return data_.get(); }
+  const float* host_data() const
+  {
+    return static_cast<const float*>(data_->contents());
+  }
 
 private:
   NS::SharedPtr<MTL::Buffer> data_;

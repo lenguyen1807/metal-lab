@@ -13,7 +13,6 @@
 #include <string>
 
 #include "gemm/matrix.h"
-#include "gemm/params.h"
 
 inline std::string read_file(const std::string& path)
 {
@@ -146,50 +145,33 @@ inline double matmul_time_to_gflops(double rows,
   return 2.0 * rows * cols * inner_dim / (milliseconds * 1e6);
 }
 
-inline void matmul_cpu(const HostMatrix& A, const HostMatrix& B, HostMatrix& C)
-{
-  assert(A.cols == B.rows);
-  assert(C.cols == B.cols);
-  assert(C.rows == A.rows);
-
-  uint M = C.rows;
-  uint N = C.cols;
-  uint K = A.cols;
-
-  uint LDA = K;
-  uint LDB = N;
-  uint LDC = N;
-
-  for (uint i = 0; i < M; ++i) {
-    for (uint j = 0; j < N; ++j) {
-      double sum = 0.0;
-      for (uint p = 0; p < K; ++p) {
-        sum += static_cast<double>(A[i * LDA + p]) * B[p * LDB + j];
-      }
-      C[i * LDC + j] = static_cast<float>(sum);
-    }
-  }
-}
-
 struct Comparison
 {
   size_t mismatches = 0;
   double max_abs_error = 0.0;
 };
 
-inline Comparison compare(const HostMatrix& actual, const HostMatrix& expected)
+inline Comparison compare(const DeviceMatrix& actual,
+                          const DeviceMatrix& expected)
 {
   assert(actual.cols == expected.cols);
   assert(actual.rows == expected.rows);
 
   Comparison result;
   const size_t count = actual.rows * actual.cols;
-
+  const float* actual_data = actual.host_data();
+  const float* expected_data = expected.host_data();
   for (size_t i = 0; i < count; ++i) {
-    const double error = std::abs(static_cast<double>(actual[i]) - expected[i]);
+    if (!std::isfinite(actual_data[i]) || !std::isfinite(expected_data[i])) {
+      result.max_abs_error = std::numeric_limits<double>::infinity();
+      ++result.mismatches;
+      continue;
+    }
+    const double reference = expected_data[i];
+    const double error = std::abs(static_cast<double>(actual_data[i])
+                                  - reference);
     result.max_abs_error = std::max(result.max_abs_error, error);
-    if (!std::isfinite(actual[i])
-        || error > 1e-3 + 1e-3 * std::abs(expected[i])) {
+    if (error > 1e-3 + 1e-3 * std::abs(reference)) {
       ++result.mismatches;
     }
   }
@@ -205,14 +187,5 @@ inline void copy(const HostMatrix& src, DeviceMatrix& dst)
   // same region. A memcpy is the most direct way to express the copy
   // operation.
   std::memcpy(static_cast<float*>(dst.data()->contents()), src.data(),
-              byte_size);
-}
-
-inline void copy(DeviceMatrix& src, HostMatrix& dst)
-{
-  assert(src.rows == dst.rows);
-  assert(src.cols == dst.cols);
-  const size_t byte_size = src.rows * src.cols * sizeof(float);
-  std::memcpy(dst.data(), static_cast<float*>(src.data()->contents()),
               byte_size);
 }

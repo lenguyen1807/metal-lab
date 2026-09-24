@@ -25,42 +25,60 @@ experiments.
 ## Check correctness
 
 ```sh
-./build/bin/gemm mps --smoke
-./build/bin/gemm naive --smoke
+./build/bin/gemm test
 ctest --test-dir build --output-on-failure
 ```
 
-The smoke suite includes tiny, square, and irregular shapes through
-`(M,N,K) = (257,263,255)`. It checks results against a CPU reference that
-accumulates in double precision. The check uses
-`abs(actual - expected) <= 1e-3 + 1e-3 * abs(expected)`.
+The test suite includes tiny, square, and irregular shapes through
+`(M,N,K) = (257,263,255)`. It runs MPS and each custom kernel once on the
+same inputs, then compares every output element. The check uses
+`abs(custom - MPS) <= 1e-3 + 1e-3 * abs(MPS)` and rejects non-finite values.
+This establishes agreement with MPS; it is not an independent proof that MPS
+or the shared input setup is correct.
 
 ## Benchmark
 
 ```sh
-./build/bin/gemm mps
-./build/bin/gemm naive
+./build/bin/gemm list
+./build/bin/gemm bench
+./build/bin/gemm bench --smoke
+./build/bin/gemm bench --kernel naive --iterations 5
 ```
 
-The default suite includes large shapes; the naive kernel can take a long time.
-Each run writes `outputs/<kernel>.csv`. Smoke runs write
-`outputs/<kernel>_smoke.csv`. New generated CSVs are ignored by Git.
+`bench` runs MPS first and then every registered custom kernel for each shape.
+`--kernel NAME` selects custom variants; MPS remains the baseline. The default
+suite includes large shapes, so the naive kernel can take a while. The default
+is 10 timing samples per variant and shape; `--iterations` changes that count.
+The smoke suite uses the six smaller test shapes. Results go to one file per
+GPU, such as `outputs/bench_apple_m5.csv` or
+`outputs/bench_smoke_apple_m5.csv`. New generated CSVs are ignored by Git.
 
-Both implementations compute row-major, non-transposed FP32
+Each shape gets one table with `median ms`, `GFLOP/s`, and `vs MPS`.
+`GFLOP/s = 2MNK / (median_ms * 10^6)`. `vs MPS` is
+`MPS_median_ms / kernel_median_ms`, equivalent to the throughput ratio for the
+same shape. Thus `0.20x` means one fifth of MPS throughput. Rows use
+`baseline`, `ok`, or `unsupported` as their status.
+
+Both implementations compute packed row-major, non-transposed FP32
 `C = A @ B` (`alpha=1`, `beta=0`) from identical preallocated
 `MTLStorageModeShared` buffers. The MPS adapter in `gemm/mps_gemm.mm` bridges
 the existing metal-cpp objects to Objective-C MPS objects. It uses packed
 `columns * sizeof(float)` row strides so the input layout matches the custom
-kernel. MPS can recommend a different row stride for best performance; that is
-a separate experiment, not part of this comparison.
+kernel. MPS can recommend a different row stride for best performance. General
+leading dimensions and an NT experiment are later, separate comparisons: NT
+changes the logical operation, while row stride describes physical storage.
+
+The native kernel registry in `gemm/kernel.cpp` assigns each variant its shader
+function, supported shapes, launch geometry, and encoding callback. The
+benchmark does not construct a native kernel's grid or bind its arguments.
 
 The reported time is `GPUEndTime - GPUStartTime` for one completed command
 buffer after one warm-up. It includes all GPU work MPS encodes into that buffer.
 It excludes input generation, buffer allocation, encoding, submission, and the
-CPU wait. The harness reports the mean of 20 runs. Tiny smoke timings are useful
-for correctness checks, not performance claims. The default suite checks CPU
-correctness for shapes whose three dimensions are at most 1024; unvalidated
-rows have `nan` in the error column.
+CPU wait. Each custom kernel is compared with the MPS output after its warm-up;
+the comparison is outside the timing loop. The harness reports the median of
+the requested samples. Tiny smoke timings are useful for wiring checks, not
+performance claims.
 
 ## Object ownership
 

@@ -8,6 +8,7 @@ add_subdirectory(metal)
 
 add_library(gemm_metal SHARED
     gemm/benchmark.cpp
+    gemm/kernel.cpp
     gemm/metal_mgr.cpp
     gemm/mps_gemm.mm
 )
@@ -27,5 +28,5 @@ add_executable(gemm main.cpp)
 target_link_libraries(gemm PRIVATE gemm_metal)
 
 enable_testing()
-add_test(NAME mps_smoke COMMAND gemm mps --smoke)
-add_test(NAME naive_smoke COMMAND gemm naive --smoke)
+add_test(NAME gemm_mps_agreement COMMAND gemm test)
+add_test(NAME gemm_comparison COMMAND gemm bench --smoke)

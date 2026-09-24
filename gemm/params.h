@@ -7,8 +7,6 @@ constexpr int PFIRST = 256;
 constexpr int PLAST = 3840;
 constexpr int PINC = 128;
 
-constexpr int BENCHMARK_TIME = 20;
-
 struct MatmulParams
 {
   uint32_t M;
