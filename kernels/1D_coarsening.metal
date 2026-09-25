@@ -10,13 +10,14 @@ struct GemmShape
 };
 
 template <uint BN, uint BM, uint BK, uint TM>
-kernel void matmul_1D_coarsening(device const float* A [[buffer(0)]],
-                        device const float* B  [[buffer(1)]],
-                        device float* C        [[buffer(2)]],
-                        device const GemmShape& params [[buffer(3)]],
-                        uint2 block_pos [[ threadgroup_position_in_grid ]],
-                        uint2 thread_pos [[ thread_position_in_threadgroup ]])
-{
+kernel void matmul_1D_coarsening(
+    device const float* A [[buffer(0)]],
+    device const float* B  [[buffer(1)]],
+    device float* C        [[buffer(2)]],
+    device const GemmShape& params [[buffer(3)]],
+    uint2 block_pos [[ threadgroup_position_in_grid ]],
+    uint2 thread_pos [[ thread_position_in_threadgroup ]]
+) {
     const uint M = params.M;
     const uint N = params.N;
     const uint K = params.K;
@@ -88,9 +89,11 @@ kernel void matmul_1D_coarsening(device const float* A [[buffer(0)]],
 }
 
 template [[ host_name("matmul_1D_coarsening_mn64k8") ]]
-kernel void matmul_1D_coarsening<64, 64, 8, 8>(device const float* A [[buffer(0)]],
-                        device const float* B  [[buffer(1)]],
-                        device float* C        [[buffer(2)]],
-                        device const GemmShape& params [[buffer(3)]],
-                        uint2 block_pos [[ threadgroup_position_in_grid ]],
-                        uint2 thread_pos [[ thread_position_in_threadgroup ]]);
+kernel void matmul_1D_coarsening<64, 64, 8, 8>(
+    device const float* A [[buffer(0)]],
+    device const float* B  [[buffer(1)]],
+    device float* C        [[buffer(2)]],
+    device const GemmShape& params [[buffer(3)]],
+    uint2 block_pos [[ threadgroup_position_in_grid ]],
+    uint2 thread_pos [[ thread_position_in_threadgroup ]]
+);

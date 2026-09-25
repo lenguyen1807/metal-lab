@@ -79,6 +79,12 @@ DispatchPlan dispatch_1D(const GemmShape& shape, const MTL::ComputePipelineState
     return {MTL::Size::Make((shape.N + BN - 1) / BN, (shape.M + BM - 1) / BM, 1),
             MTL::Size::Make((BM * BN) / TM, 1, 1)};
 }
+
+template <size_t BM, size_t BN, size_t BK, size_t TM, size_t TN>
+DispatchPlan dispatch_2D(const GemmShape& shape, const MTL::ComputePipelineState& pipeline) {
+    return {MTL::Size::Make((shape.N + BN - 1) / BN, (shape.M + BM - 1) / BM, 1),
+            MTL::Size::Make((BM * BN) / (TM * TN), 1, 1)};
+}
 }  // namespace coarsening_registry
 
 const std::vector<KernelSpec>& kernel_specs() {
@@ -95,6 +101,8 @@ const std::vector<KernelSpec>& kernel_specs() {
         // coarsening
         {"1D_coarsening", "matmul_1D_coarsening_mn64k8",
          coarsening_registry::dispatch_1D<64, 64, 8, 8>, all_shapes, naive_registry::encode},
+        {"2D_coarsening", "matmul_2D_coarsening_mn128k8",
+         coarsening_registry::dispatch_2D<128, 128, 8, 8, 8>, all_shapes, naive_registry::encode},
         // tensor op
         {"tensorops", "tensorops_64x64", tensorops_registry::dispatch<64, 64>, all_shapes,
          naive_registry::encode},
